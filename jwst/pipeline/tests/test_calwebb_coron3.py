@@ -2,7 +2,7 @@ import pytest
 
 from stdatamodels.jwst.datamodels import CubeModel
 
-from jwst.pipeline.calwebb_coron3 import to_container
+from jwst.pipeline.calwebb_coron3 import to_list_of_planes
 
 
 # Generate data
@@ -11,7 +11,7 @@ def make_container():
     size = 5
     cube = CubeModel((size, size, size))
     cube.meta.target.proposer_name = 'JWST regression test'
-    container = to_container(cube)
+    container = to_list_of_planes(cube)
     return cube, container
 
 
