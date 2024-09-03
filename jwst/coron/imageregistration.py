@@ -186,7 +186,7 @@ def align_array(reference, target, mask=None, return_aligned=True):
     return aligned, shifts
 
 
-def align_models(reference, target, mask, in_memory=False):
+def align_models(reference, target, mask, in_memory=False, output_dir="psfalign"):
     """
     Computes shifts between target image (or image "slices") and the reference
     image and re-aligns target images to the reference.
@@ -211,6 +211,10 @@ def align_models(reference, target, mask, in_memory=False):
         If True, the output psfalign library is kept in memory. If False, the output
         library is saved to disk in on_disk mode
 
+    output_dir : str
+        The directory where the output psfalign library will be saved if in_memory
+        is False.
+
     Returns
     -------
 
@@ -233,7 +237,7 @@ def align_models(reference, target, mask, in_memory=False):
         mask=mask.data, return_aligned=False)
 
     # Loop over all integrations of the science exposure
-    tmpdir_psfalign = Path("psfalign")
+    tmpdir_psfalign = Path(output_dir)
     tmpdir_psfalign.mkdir(exist_ok=True)
     log.info(f"Creating psfalign library, {nrefslices} models each of shape %s", cube_shape)
     psfalign_files = []
@@ -253,20 +257,26 @@ def align_models(reference, target, mask, in_memory=False):
                 target.err.astype(np.float64),
                 -shifts)
             
-        fname = "psfalign_" + str(k) + ".fits"
         output_cube.meta.cal_step.align_psfs = 'COMPLETE'
-        output_cube.save(tmpdir_psfalign / fname)
-        psfalign_files.append(fname)
+        if not in_memory:
+            fname = "psfalign_" + str(k) + ".fits"
+            output_cube.save(tmpdir_psfalign / fname)
+            psfalign_files.append(fname)
+        else:
+            psfalign_files.append(output_cube)
 
         # TODO: in the future we need to add shifts and other info (such as
         # slice ID from the reference image to which target was aligned)
         # to output cube metadata (or property).
     
+    if not in_memory:
     # turn the list of file names into a ModelLibrary
-    psfalign_members = [{'expname': fname, 'exptype': 'science'} for fname in psfalign_files]
-    psfalign_asn = {"products":[{"name":"coron3_psfalign","members":psfalign_members}]}
-    asn_path = tmpdir_psfalign / "asn.json"
-    asn_path.write_text(json.dumps(psfalign_asn))
-    output_model = ModelLibrary(asn_path, on_disk=not in_memory)
+        psfalign_members = [{'expname': fname, 'exptype': 'science'} for fname in psfalign_files]
+        psfalign_asn = {"products":[{"name":"coron3_psfalign","members":psfalign_members}]}
+        asn_path = tmpdir_psfalign / "asn.json"
+        asn_path.write_text(json.dumps(psfalign_asn))
+        output_model = ModelLibrary(asn_path, on_disk=not in_memory)
+    else:
+        output_model = ModelLibrary(psfalign_files)
 
     return output_model

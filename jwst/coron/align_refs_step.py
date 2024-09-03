@@ -24,6 +24,7 @@ class AlignRefsStep(Step):
         median_box_length = integer(default=3,min=0) # box size for the median filter
         bad_bits = string(default="DO_NOT_USE") # the DQ bit values of bad pixels
         in_memory = boolean(default=False) # keep psfalign output in memory
+        output_dir = string(default="psfalign") # output directory
     """
 
     reference_file_types = ['psfmask']
@@ -66,7 +67,8 @@ class AlignRefsStep(Step):
 
             # Call the alignment routine
             result = imageregistration.align_models(target_model, psf_model,
-                                                    mask_model, in_memory=self.in_memory)
+                                                    mask_model, in_memory=self.in_memory,
+                                                    output_dir=self.output_dir)
 
             mask_model.close()
             psf_model.close()

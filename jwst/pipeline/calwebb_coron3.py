@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import os.path as op
 import os
+import shutil
 from ..stpipe import Pipeline
 
 from stdatamodels.jwst import datamodels
@@ -174,15 +175,14 @@ class Coron3Pipeline(Pipeline):
                 # Call align_refs
                 psf_aligned = self.align_refs(target, psf_stack)
 
-                # # Save the alignment results
-                # self.save_model(
-                #     psf_aligned, output_file=target_file,
-                #     suffix='psfalign', acid=self.asn_id
-                # )
-
                 # Call KLIP
                 psf_sub = self.klip(target, psf_aligned)
                 del psf_aligned
+
+                # remove the _psfalign library.
+                # Future improvement will be to make this an optional output
+                tmpdir_psfalign = op.join(os.getcwd(), self.align_refs.output_dir)
+                shutil.rmtree(tmpdir_psfalign)
 
                 # Save the psf subtraction results
                 self.save_model(

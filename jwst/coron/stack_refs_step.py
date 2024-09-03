@@ -1,4 +1,4 @@
-from stdatamodels.jwst import datamodels
+from jwst.datamodels import ModelLibrary
 
 from ..stpipe import Step
 
@@ -24,12 +24,11 @@ class StackRefsStep(Step):
         input: str or datamodels.ModelLibrary
         """
 
-        # Open the inputs
-        with datamodels.open(input) as input_models:
+        if not isinstance(input, ModelLibrary):
+            input = ModelLibrary(input)
 
-            # Call the stacking routine
-            output_model = stack_refs.make_cube(input_models)
-
-            output_model.meta.cal_step.stack_psfs = 'COMPLETE'
+        # Call the stacking routine
+        output_model = stack_refs.make_cube(input)
+        output_model.meta.cal_step.stack_psfs = 'COMPLETE'
 
         return output_model
