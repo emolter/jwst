@@ -20,6 +20,9 @@ class StackRefsStep(Step):
     """
 
     def process(self, input):
+        """
+        input: str or datamodels.ModelLibrary
+        """
 
         # Open the inputs
         with datamodels.open(input) as input_models:

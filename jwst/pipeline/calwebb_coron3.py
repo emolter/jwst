@@ -60,7 +60,7 @@ class Coron3Pipeline(Pipeline):
 
     spec = """
         suffix = string(default='i2d')
-        on_disk = boolean(default=False)
+        in_memory = boolean(default=False)
     """
 
     # Define aliases to steps
@@ -87,7 +87,7 @@ class Coron3Pipeline(Pipeline):
         asn_exptypes = ['science', 'psf']
 
         # Create a DM object using the association table
-        input_models = ModelLibrary(user_input, asn_exptypes=asn_exptypes, on_disk=self.on_disk)
+        input_models = ModelLibrary(user_input, asn_exptypes=asn_exptypes, on_disk=not self.in_memory)
 
         # This asn_id assignment is important as it allows outlier detection
         # to know the asn_id since that step receives the cube as input.
@@ -142,6 +142,7 @@ class Coron3Pipeline(Pipeline):
                     self.outlier_detection.skip = False
                     psf_models.append(model)
                     input_models.shelve(model, i)
+                del model
         else:
             self.log.info('Outlier detection skipped for PSF\'s')
 
@@ -173,15 +174,14 @@ class Coron3Pipeline(Pipeline):
                 # Call align_refs
                 psf_aligned = self.align_refs(target, psf_stack)
 
-                # Save the alignment results
-                self.save_model(
-                    psf_aligned, output_file=target_file,
-                    suffix='psfalign', acid=self.asn_id
-                )
+                # # Save the alignment results
+                # self.save_model(
+                #     psf_aligned, output_file=target_file,
+                #     suffix='psfalign', acid=self.asn_id
+                # )
 
                 # Call KLIP
                 psf_sub = self.klip(target, psf_aligned)
-                psf_aligned.close()
                 del psf_aligned
 
                 # Save the psf subtraction results
@@ -199,10 +199,11 @@ class Coron3Pipeline(Pipeline):
 
                 del psf_sub
                 input_models.shelve(target, i, modify=False)
+            del target
 
         resample_input_members = [{'expname': fname, 'exptype': 'science'} for fname in resample_input_files]
         resample_asn = {"products":[{"name":"coron3_resample_input","members":resample_input_members}]}
-        resample_library = ModelLibrary(resample_asn, on_disk=self.on_disk)
+        resample_library = ModelLibrary(resample_asn, on_disk=not self.in_memory)
 
         # Call the resample step to combine all psf-subtracted target images
         # Output is a single datamodel

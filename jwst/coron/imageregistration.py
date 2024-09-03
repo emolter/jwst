@@ -1,9 +1,12 @@
 import numpy as np
+import json
+from pathlib import Path
 
 from scipy import optimize
 from scipy.ndimage import fourier_shift
 
-from stdatamodels.jwst.datamodels import QuadModel
+from stdatamodels.jwst.datamodels import CubeModel
+from jwst.datamodels import ModelLibrary
 
 import logging
 log = logging.getLogger(__name__)
@@ -183,7 +186,7 @@ def align_array(reference, target, mask=None, return_aligned=True):
     return aligned, shifts
 
 
-def align_models(reference, target, mask):
+def align_models(reference, target, mask, in_memory=False):
     """
     Computes shifts between target image (or image "slices") and the reference
     image and re-aligns target images to the reference.
@@ -204,10 +207,14 @@ def align_models(reference, target, mask):
         minimization. Mask acts as a weighting function in performing
         the fit.
 
+    in_memory : bool
+        If True, the output psfalign library is kept in memory. If False, the output
+        library is saved to disk in on_disk mode
+
     Returns
     -------
 
-        A QuadModel containing aligned copies of the input ``target``
+        A ModelLibrary containing aligned copies of the input ``target``
         cubes aligned to each slice in the input ``reference`` cube.
 
     """
@@ -216,10 +223,7 @@ def align_models(reference, target, mask):
     nrefslices = reference.data.shape[0]
 
     # Create output QuadModel of required dimensions
-    quad_shape = (nrefslices,
-                  target.shape[0], target.shape[1], target.shape[2])
-    output_model = QuadModel(quad_shape)
-    output_model.update(target)
+    cube_shape = (target.shape[0], target.shape[1], target.shape[2])
 
     # Compute the shifts of the PSF ("target") images relative to
     # the science ("reference") image in the first integration
@@ -229,20 +233,40 @@ def align_models(reference, target, mask):
         mask=mask.data, return_aligned=False)
 
     # Loop over all integrations of the science exposure
+    tmpdir_psfalign = Path("psfalign")
+    tmpdir_psfalign.mkdir(exist_ok=True)
+    log.info(f"Creating psfalign library, {nrefslices} models each of shape %s", cube_shape)
+    psfalign_files = []
     for k in range(nrefslices):
 
         # Apply the shifts to the PSF images
-        output_model.data[k] = fourier_imshift(
+        data = fourier_imshift(
             target.data.astype(np.float64),
             -shifts)
+        
+        output_cube = CubeModel(data=data)
+        output_cube.update(target)
 
         # Apply the same shifts to the PSF error arrays, if they exist
         if target.err is not None:
-            output_model.err[k] = fourier_imshift(
+            output_cube.err = fourier_imshift(
                 target.err.astype(np.float64),
                 -shifts)
+            
+        fname = "psfalign_" + str(k) + ".fits"
+        output_cube.meta.cal_step.align_psfs = 'COMPLETE'
+        output_cube.save(tmpdir_psfalign / fname)
+        psfalign_files.append(fname)
 
         # TODO: in the future we need to add shifts and other info (such as
         # slice ID from the reference image to which target was aligned)
         # to output cube metadata (or property).
+    
+    # turn the list of file names into a ModelLibrary
+    psfalign_members = [{'expname': fname, 'exptype': 'science'} for fname in psfalign_files]
+    psfalign_asn = {"products":[{"name":"coron3_psfalign","members":psfalign_members}]}
+    asn_path = tmpdir_psfalign / "asn.json"
+    asn_path.write_text(json.dumps(psfalign_asn))
+    output_model = ModelLibrary(asn_path, on_disk=not in_memory)
+
     return output_model

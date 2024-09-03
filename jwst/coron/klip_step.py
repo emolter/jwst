@@ -24,18 +24,19 @@ class KlipStep(Step):
     """
 
     def process(self, target, psfrefs):
+        """
+        target : str or datamodels.CubeModel
 
+        psfrefs : datamodels.ModelLibrary
+        """
         with datamodels.open(target) as target_model:
 
             # Retrieve the parameter values
             truncate = self.truncate
             self.log.info('KL transform truncation = %d', truncate)
 
-            # Get the PSF reference images
-            refs_model = datamodels.open(psfrefs)
-
             # Call the KLIP routine
-            psf_sub, psf_fit = klip.klip(target_model, refs_model, truncate)
+            psf_sub, psf_fit = klip.klip(target_model, psfrefs, truncate)
 
         # Update the step completion status
         psf_sub.meta.cal_step.klip = 'COMPLETE'
