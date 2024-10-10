@@ -384,17 +384,17 @@ to supply custom catalogs.
             if isinstance(model, JwstDataModel):
                 model.close()
 
-    # @property
-    # def crds_observatory(self):
-    #     """
-    #     Get the CRDS observatory for this container.  Used when selecting
-    #     step/pipeline parameter files when the container is a pipeline input.
+    @property
+    def crds_observatory(self):
+        """
+        Get the CRDS observatory for this container.  Used when selecting
+        step/pipeline parameter files when the container is a pipeline input.
 
-    #     Returns
-    #     -------
-    #     str
-    #     """
-    #     return "jwst"
+        Returns
+        -------
+        str
+        """
+        return "jwst"
 
     # def get_crds_parameters(self):
     #     """
