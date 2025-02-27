@@ -195,17 +195,6 @@ def matrix_dft(plane, nlam_d, npix, offset=None, inverse=False, centering=FFTSTY
     return norm_coeff * t2
 
 
-def matrix_idft(*args, **kwargs):
-    kwargs["inverse"] = True
-    return matrix_dft(*args, **kwargs)
-
-
-matrix_idft.__doc__ = matrix_dft.__doc__.replace(  # type: ignore[union-attr]
-    "Perform a matrix discrete Fourier transform",
-    "Perform an inverse matrix discrete Fourier transform",
-)
-
-
 class MatrixFourierTransform:
     """
     Implements a discrete matrix Fourier transform for optical propagation.
@@ -302,44 +291,3 @@ class MatrixFourierTransform:
             f"offset {offset}"
         )
         return matrix_dft(pupil, nlam_d, npix, centering=self.centering, offset=offset)
-
-    def inverse(self, image, nlam_d, npix, offset=None):
-        """
-        Inverse matrix discrete Fourier Transform.
-
-        Parameters
-        ----------
-        image : 2D ndarray
-            2D array (either real or complex) representing the input image
-            plane to transform.
-        nlam_d : float or 2-tuple of floats (nlam_dy, nlam_dx)
-            Size of desired output region in lambda / D units, assuming that
-            the pupil fills the input array (corresponds to 'm' in
-            Soummer et al. 2007 4.2). This is in units of the spatial frequency
-            that is just Nyquist sampled by the input array.) If given as a
-            tuple, interpreted as (nlam_dy, nlam_dx).
-        npix : int or 2-tuple of ints (npix_y, npix_x)
-            Number of pixels per side side of destination plane array
-            (corresponds to 'N_B' in Soummer et al. 2007 4.2). This will be the
-            # of pixels in the image plane for a forward transformation, in the
-            pupil plane for an inverse. If given as a tuple, interpreted as
-            (npix_y, npix_x).
-        offset : 2-tuple of floats (offset_y, offset_x)
-            For ADJUSTABLE-style transforms, an offset in pixels by which the
-            PSF will be displaced from the central pixel (or cross). Given as
-            (offset_y, offset_x).
-
-        Returns
-        -------
-        complex ndarray
-            The Fourier transform of the input
-        """
-        self._validate_args(nlam_d, npix, offset)
-        _log.debug(
-            f"Inverse MatrixFourierTransform: array shape {image.shape}, "
-            f"centering style {self.centering}, "
-            f"output region size {nlam_d} in lambda / D units, "
-            f"output array size {npix} pixels, "
-            f"offset {offset}"
-        )
-        return matrix_idft(image, nlam_d, npix, centering=self.centering, offset=offset)

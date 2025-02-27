@@ -127,25 +127,6 @@ class NIRISS:
         }
         self.threshold = self.cvsupport_threshold[filt]
 
-    def set_pscale(self, pscalex_deg=None, pscaley_deg=None):
-        """
-        Override pixel scale in header.
-
-        Parameters
-        ----------
-        pscalex_deg : float, degrees
-            Pixel scale in x-direction
-
-        pscaley_deg : float, degrees
-            Pixel scale in y-direction
-        """
-        if pscalex_deg is not None:
-            self.pscalex_deg = pscalex_deg
-        if pscaley_deg is not None:
-            self.pscaley_deg = pscaley_deg
-        self.pscale_mas = 0.5 * (pscalex_deg + pscaley_deg) * (60 * 60 * 1000)
-        self.pscale_rad = utils.mas2rad(self.pscale_mas)
-
     def read_data_model(self, input_model):
         """
         Read the NIRISS data model.
@@ -306,17 +287,6 @@ class NIRISS:
             dqmask_ctrd = np.zeros_like(scidata_ctrd)
 
         return scidata_ctrd, dqmask_ctrd
-
-    def reset_nwav(self, nwav):
-        """
-        Reset self.nwav parameter.
-
-        Parameters
-        ----------
-        nwav : int
-            Length of axis3 for 3D input
-        """
-        self.nwav = nwav
 
     def mast2sky(self):
         """
