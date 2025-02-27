@@ -17,11 +17,3 @@ def test_find_centroid():
     arr = np.zeros((30, 30), dtype='f4')
     arr[15, 15] = 1
     assert np.allclose(utils.find_centroid(arr), (0.5, 0.5))
-
-
-@pytest.mark.parametrize("mas, rad", [
-    (206264.8062471, 0.001),
-    (103132403.12355, 0.5),
-])
-def test_mas2rad(mas, rad):
-    assert np.isclose(utils.mas2rad(mas), rad)

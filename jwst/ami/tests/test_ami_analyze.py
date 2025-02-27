@@ -10,12 +10,12 @@ import pytest
 
 from stdatamodels.jwst import datamodels
 
-from jwst.ami import utils, leastsqnrm, hexee
-from jwst.ami.leastsqnrm import hexpb, ffc, ffs, closure_amplitudes
-from jwst.ami.leastsqnrm import closurephase, redundant_cps
+from jwst.ami import utils, leastsqnrm
+from jwst.ami.leastsqnrm import closure_amplitudes
+from jwst.ami.leastsqnrm import redundant_cps
 from jwst.ami.leastsqnrm import populate_symmamparray
 from jwst.ami.leastsqnrm import populate_antisymmphasearray
-from jwst.ami.leastsqnrm import tan2visibilities, model_array
+from jwst.ami.leastsqnrm import tan2visibilities
 from jwst.ami.analyticnrm2 import interf, psf, phasor, asf_hex
 
 from numpy.testing import assert_allclose
@@ -33,45 +33,6 @@ def test_utils_rebin():
 
     true_arr = np.array([[5.1, 6.3, 7.5, 8.7]])
     assert_allclose(binned_arr, true_arr)
-
-
-def test_utils_quadratic():
-    """Test of quadratic in utils module"""
-    x = np.array([0.5, 0.55, 0.55, 0.65, 0.70, 0.8, 0.85, 1.0, 1.01, 1.02, 1.03, 1.04, 1.05])
-    p = np.array([-2.0, 3.0, 7.0])
-
-    maxx, maxy, fit_vals = utils.quadratic(p, x)
-
-    true_maxx = 0.75
-    true_maxy = 8.125
-    assert_allclose([maxx, maxy], [true_maxx, true_maxy])
-
-    true_fit_vals = np.array(
-        [8.0, 8.045, 8.045, 8.105, 8.12, 8.12, 8.105, 8.0, 7.9898, 7.9792, 7.9682, 7.9568, 7.945]
-    )
-    assert_allclose(fit_vals, true_fit_vals)
-
-
-def test_utils_findmax():
-    """Test of findmax in utils module"""
-    mag = np.arange(9) + 1.0
-    delt = 1.0e-7
-    mag[2] += delt
-    mag[5] += delt  # Add a bit of deterministic noise
-    mag[1] -= delt
-    mag[7] -= delt
-
-    vals = (mag - 3.0) ** 2 + 5  # Is quadratic ...
-    vals[1] += delt
-    vals[6] += delt  # ... with a bit more noise
-    vals[4] -= delt
-    vals[3] -= delt
-
-    maxx, maxy = utils.findmax(mag, vals)
-
-    true_maxx = 3.0
-    true_maxy = 5.0
-    assert_allclose([maxx, maxy], [true_maxx, true_maxy])
 
 
 def test_utils_makeA():
@@ -169,133 +130,9 @@ def test_utils_crosscorrelate():
     assert_allclose(result, true_result)
 
 
-def test_utils_imgmedian():
-    """Test of img_median_replace() in utils module"""
-    # create input image model containing NaN's and DO_NOT_USE flags
-    data = np.array(
-        [
-            [1.0, 2.0, 3.0, 4.0, 5.0],
-            [6.0, 0.0, 8.0, 9.0, 10.0],
-            [11.0, 12.0, 13.0, 14.0, 15.0],
-            [16.0, 17.0, np.nan, 0.0, 20.0],
-            [21.0, 22.0, 23.0, 24.0, 25.0],
-        ], dtype=np.float32,
-    )
-
-    dq = np.array(
-        [
-            [0, 0, 0, 0, 0],
-            [0, 1, 4, 0, 0],
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 1, 0],
-            [0, 0, 0, 0, 0],
-        ], dtype=np.uint32,
-    )
-
-    input_model = datamodels.ImageModel(data=data, dq=dq)
-
-    # send to img_median_replace to replace bad pixels
-    input_model = utils.img_median_replace(input_model, box_size=3)
-
-    expected_result = np.array(
-        [
-            [1.0, 2.0, 3.0, 4.0, 5.0],
-            [6.0, 7.0, 8.0, 9.0, 10.0],
-            [11.0, 12.0, 13.0, 14.0, 15.0],
-            [16.0, 17.0, 17.0, 18.5, 20.0],
-            [21.0, 22.0, 23.0, 24.0, 25.0],
-        ], dtype=np.float32,
-    )
-
-    assert_allclose(input_model.data, expected_result)
-
-
 # ---------------------------------------------------------------
 # leastsqnrm module tests:
 #
-def test_leastsqnrm_rotatevectors():
-    """Test of rotatevectors() in leastsqnrm module.
-    Positive x decreases under slight rotation, and positive y
-    increases under slight rotation.
-    """
-    vec = np.arange(8).reshape((4, 2)) + 1.0
-    rot_vec = leastsqnrm.rotatevectors(vec, thetarad=0.001)
-
-    true_rot_vec = np.array(
-        [[0.9979995, 2.000999], [2.9959985, 4.002998], [4.9939975, 6.004997], [6.9919965, 8.006996]]
-    )
-    assert_allclose(rot_vec, true_rot_vec)
-
-    rot_vec = leastsqnrm.rotatevectors(vec, thetarad=math.pi / 2.0)
-    true_rot_vec = np.array([[-2.0, 1.0], [-4.0, 3.0], [-6.0, 5.0], [-8.0, 7.0]])
-    assert_allclose(rot_vec, true_rot_vec)
-
-
-def test_leastsqnrm_flip():
-    """Test of flip() in leastsqnrm module.
-    Change sign of 2nd coordinate of holes.
-    """
-    vec = np.arange(8).reshape((4, 2)) + 1.0
-    flip_vec = leastsqnrm.flip(vec)
-
-    true_flip_vec = np.array([[1.0, -2.0], [3.0, -4.0], [5.0, -6.0], [7.0, -8.0]])
-    assert_allclose(flip_vec, true_flip_vec)
-
-
-def test_leastsqnrm_mas2rad():
-    """Test of mas2rad() in leastsqnrm module.
-    Convert angle in milli arc-sec to radians.
-    """
-    mas = 1.0e8
-    theta_rad = leastsqnrm.mas2rad(mas)
-
-    true_theta_rad = mas * (10 ** (-3)) / (3600 * 180 / np.pi)
-    assert_allclose(theta_rad, true_theta_rad)
-
-
-def test_leastsqnrm_rad2mas():
-    """Test of rad2mas() in leastsqnrm module.
-    Convert input angle in radians to milli arc sec.
-    """
-    theta_rad = 1.0e-6
-    mas = leastsqnrm.rad2mas(theta_rad)
-
-    true_mas = theta_rad * (3600.0 * 180 / np.pi) * 10.0 ** 3
-    assert_allclose(mas, true_mas)
-
-
-def test_leastsqnrm_sin2deltapistons():
-    """Test of sin2deltapistons() in leastsqnrm module.
-    Each baseline has one sine and one cosine fringe with a coefficient
-    that depends on the piston difference between the two holes that make
-    the baseline.  For a 7-hole mask there are 21 baselines and therefore
-    there are 42 sine and cosine terms that contribute to the fringe model.
-    This function calculates the sine of this piston difference.
-    """
-    # 4 holes (6 baselines) plus average flux per hole and DC offset
-    coeffs = np.array([1.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
-
-    delta = leastsqnrm.sin2deltapistons(coeffs)
-
-    true_delta = np.array([0.04849334, 0.08333333, 0.12340834])
-    assert_allclose(delta, true_delta)
-
-
-def test_leastsqnrm_cos2deltapistons():
-    """Test of cos2deltapistons() in leastsqnrm module.
-    Each baseline has one sine and one cosine fringe with a coefficient
-    that depends on the piston difference between the two holes that make
-    the baseline.  For a 7-hole mask there are 21 baselines and therefore
-    there are 42 sine and cosine terms that contribute to the fringe model.
-    This function calculate the cosine of this piston difference.
-    """
-    # 4 holes (6 baselines) plus average flux per hole and DC offset
-    coeffs = np.array([1.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
-
-    delta = leastsqnrm.cos2deltapistons(coeffs)
-
-    true_delta = np.array([0.21795289, 0.18450506, 0.14758362])
-    assert_allclose(delta, true_delta)
 
 
 def test_leastsqnrm_replacenan():
@@ -311,207 +148,6 @@ def test_leastsqnrm_replacenan():
     assert_allclose(rep_arr, true_rep_arr)
 
 
-def test_leastsqnrm_hexpb():
-    """Test of hexpb() in leastsqnrm module.
-    Calculate the primary beam for hexagonal holes.
-    """
-    # Clean up any attributes that may have been added earlier
-    for kk in list((hexpb.__dict__).keys()):
-        delattr(hexpb, kk)
-
-    hexpb.d = 0.5
-    hexpb.lam = 2.0e-06
-    hexpb.offx = 28.0
-    hexpb.offy = 28.0
-    hexpb.pitch = 1.0e-07
-    hexpb.shape = 'hex'
-    hexpb.size = (3, 3)
-
-    hexpb_arr = hexpb()
-
-    true_hexpb_arr = np.array(
-        [
-            [0.01520087, 0.01901502, 0.02328432],
-            [0.01912038, 0.02356723, 0.02850747],
-            [0.02349951, 0.02861771, 0.03426836],
-        ]
-    )
-    assert_allclose(hexpb_arr, true_hexpb_arr, atol=1e-7)
-
-    # Clean up attributes that have been added
-    for kk in list((hexpb.__dict__).keys()):
-        delattr(hexpb, kk)
-
-
-def test_leastsqnrm_model_array():
-    """Test of model_array in leastsqnrm module.
-    Create a model using the specified wavelength.
-    """
-    import warnings
-
-    test_res = []  # to accumulate subtest comparisons
-
-    modelctrs = np.array(
-        [
-            [-0.01540951, -2.63995503],
-            [-2.28627105, 0.01334504],
-            [2.2785663, -1.33332266],
-            [-2.2785663, 1.33332266],
-            [-1.1315734, 1.98663876],
-            [2.29397581, 1.30663257],
-            [1.15468766, 1.97329378],
-        ]
-    )
-    lam = 2.3965000082171173e-06
-    oversample = 3  # oversample factor
-    modelpix = 2.729940189982537e-07
-    fov = 19
-    hole_d = 0.8  # hole diameter
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "invalid value*", RuntimeWarning)
-        warnings.filterwarnings("ignore", "divide by zero*", RuntimeWarning)
-        pb, ff = model_array(
-            modelctrs,
-            lam,
-            oversample,
-            modelpix,
-            fov,
-            hole_d,
-            centering="PIXELCENTERED",
-            shape="hex",
-        )
-
-    pb_1 = pb[15:18, 20:23]
-    true_pb_1 = np.array(
-        [
-            [0.40298655, 0.42031716, 0.43582878],
-            [0.43220726, 0.45055339, 0.46696826],
-            [0.46060077, 0.47992491, 0.49720953],
-        ]
-    )
-    test_res.append(np.allclose(pb_1, true_pb_1, rtol=1.0e-7))
-
-    pb_2 = pb[25:28, 10:13]
-    true_pb_2 = np.array(
-        [
-            [0.30173028, 0.33450152, 0.36798482],
-            [0.30622563, 0.33939216, 0.37327326],
-            [0.30894849, 0.34235409, 0.37647573],
-        ]
-    )
-    test_res.append(np.allclose(pb_2, true_pb_2, rtol=1.0e-7))
-
-    ff_1 = ff[1][15:18, 20:23]  # slice 1
-    true_ff_1 = np.array(
-        [
-            [-1.45863979, -0.5441426, 0.52620696],
-            [-1.98551072, -1.57725007, -0.71723623],
-            [-1.74296371, -1.9991473, -1.68273863],
-        ]
-    )
-    test_res.append(np.allclose(ff_1, true_ff_1, rtol=1.0e-7))
-
-    ff_5 = ff[5][25:28, 10:13]  # slice 5
-    true_ff_5 = np.array(
-        [
-            [1.65967899, 1.99729328, 1.76662698],
-            [0.06173976, 1.0806429, 1.79207573],
-            [-1.58764681, -0.73650014, 0.32419949],
-        ]
-    )
-    test_res.append(np.allclose(ff_5, true_ff_5, rtol=1.0e-7))
-
-    assert np.all(test_res)
-
-
-def test_leastsqnrm_ffc():
-    """Test of ffc in leastsqnrm module.
-    Calculate cosine terms of analytic model.
-    """
-    ASIZE = 4
-    kx = np.arange(ASIZE * ASIZE).reshape((ASIZE, ASIZE))
-    ky = np.arange(ASIZE * ASIZE).reshape((ASIZE, ASIZE))
-    vv = np.arange(ASIZE)
-
-    for ii in np.arange(ASIZE):
-        kx[:, ii] = vv
-        ky[ii, :] = vv
-
-    # Clean up any attributes that may have been added earlier
-    for kk in list((ffc.__dict__).keys()):
-        delattr(ffc, kk)
-
-    ffc.N = 7
-    ffc.lam = 2.3965000082171173e-06
-    ffc.offx = 28.0
-    ffc.offy = 28.0
-    ffc.over = 3
-    ffc.pitch = 9.099800633275124e-08
-    ffc.ri = np.array([-0.01540951, -2.63995503])
-    ffc.rj = np.array([-2.28627105, 0.01334504])
-    ffc.size = (57, 57)
-
-    ffc_arr = ffc(kx, ky)
-
-    true_ffc_arr = np.array(
-        [
-            [-1.66542264, -0.68760215, 0.55667544, 1.58523217],
-            [-1.99797288, -1.55759213, -0.51361892, 0.72939004],
-            [-1.75826723, -1.98145931, -1.43680344, -0.3353627],
-            [-1.01496177, -1.83780038, -1.94846124, -1.30406145],
-        ]
-    )
-
-    assert_allclose(ffc_arr, true_ffc_arr)
-
-    for kk in list((ffc.__dict__).keys()):
-        delattr(ffc, kk)
-
-
-def test_leastsqnrm_ffs():
-    """Test of ffs in leastsqnrm module.
-    Calculate sine terms of analytic model.
-    """
-    ASIZE = 4
-    kx = np.arange(ASIZE * ASIZE).reshape((ASIZE, ASIZE))
-    ky = np.arange(ASIZE * ASIZE).reshape((ASIZE, ASIZE))
-    vv = np.arange(ASIZE)
-
-    for ii in np.arange(ASIZE):
-        kx[:, ii] = vv
-        ky[ii, :] = vv
-
-    for kk in list((ffs.__dict__).keys()):
-        delattr(ffs, kk)
-
-    ffs.N = 7
-    ffs.lam = 2.3965000082171173e-06
-    ffs.offx = 28.0
-    ffs.offy = 28.0
-    ffs.over = 3
-    ffs.pitch = 9.099800633275124e-08
-    ffs.ri = np.array([-0.01540951, -2.63995503])
-    ffs.rj = np.array([-2.28627105, 0.01334504])
-    ffs.size = (57, 57)
-
-    ffs_arr = ffs(kx, ky)
-
-    true_ffs_arr = np.array(
-        [
-            [-1.10741476, -1.878085, -1.92096654, -1.21944207],
-            [-0.09002431, -1.2545544, -1.93292411, -1.86225406],
-            [0.95315074, -0.27169652, -1.39125694, -1.97168249],
-            [1.72332603, 0.7889802, -0.45110839, -1.51638509],
-        ]
-    )
-
-    assert_allclose(ffs_arr, true_ffs_arr)
-
-    for kk in list((ffs.__dict__).keys()):
-        delattr(ffs, kk)
-
-
 def test_leastsqnrm_closure_amplitudes():
     """Test of closure_amplitudes() in leastsqnrm module.
     Calculate the closure amplitudes.
@@ -524,45 +160,6 @@ def test_leastsqnrm_closure_amplitudes():
 
     true_cas = np.array([0.7, 0.04545455, 0.3030303, 6.66666667, 18.0])
     assert_allclose(cas, true_cas, atol=1e-7)
-
-
-def test_leastsqnrm_closurephase():
-    """Test of closurephase in leastsqnrm module.
-    Calculate closure phases between each pair of holes.
-    """
-    n = 7  # number of holes
-    deltap = np.array(
-        [
-            0.1,
-            -0.2,
-            0.3,
-            0.2,
-            0.05,
-            -0.7,
-            -0.05,
-            0.7,
-            0.1,
-            0.02,
-            -0.5,
-            -0.05,
-            0.7,
-            0.1,
-            0.3,
-            0.4,
-            -0.2,
-            -0.3,
-            0.2,
-            0.5,
-            0.3,
-        ]
-    )
-
-    cps = closurephase(deltap, n=n)
-
-    true_cps = np.array(
-        [0.25, 0.5, 0.0, 0.07, 0.3, -0.8, 0.55, 0.03, 0.75, -0.35, -0.35, -0.65, 0.8, 1.2, 0.0]
-    )
-    assert_allclose(cps, true_cps, atol=1e-8)
 
 
 def test_leastsqnrm_redundant_cps():
@@ -748,47 +345,6 @@ def test_leastsqnrm_multiplyenv():
     )
 
     assert_allclose(full, true_full, atol=1e-8)
-
-
-# ---------------------------------------------------------------
-# hexee module tests:
-#
-def test_hexee_g_eeag():
-    """Test of g_eeag() in the hexee module.
-    Calculate the Fourier transform of one half of a hexagon that is
-    bisected from one corner to its diametrically opposite corner.
-    """
-    xi, eta, kwargs = setup_hexee()
-    g = hexee.g_eeag(xi, eta, **kwargs)
-
-    true_g = np.array(
-        [
-            [-0.04454286 + 0.05015766j, -0.04164985 + 0.06041733j, -0.03830953 + 0.07099764j],
-            [-0.04072437 + 0.05375103j, -0.03729262 + 0.06415232j, -0.03340318 + 0.07486623j],
-            [-0.03657856 + 0.05703437j, -0.03258885 + 0.06754246j, -0.02813134 + 0.07835476j],
-        ]
-    )
-
-    assert_allclose(g, true_g)
-
-
-def test_hexee_glimit():
-    """Test of glimit() in the hexee module.
-    Calculate the analytic limit of the Fourier transform of one half of the
-    hexagon along eta=0.
-    """
-    xi, _, kwargs = setup_hexee()
-    g = hexee.glimit(xi, **kwargs)
-
-    true_g = np.array(
-        [
-            [0.07105571 + 0.28088478j, 0.07105571 + 0.28088478j, 0.07105571 + 0.28088478j],
-            [0.08609692 + 0.28598645j, 0.08609692 + 0.28598645j, 0.08609692 + 0.28598645j],
-            [0.10178022 + 0.29008864j, 0.10178022 + 0.29008864j, 0.10178022 + 0.29008864j],
-        ]
-    )
-
-    assert_allclose(g, true_g)
 
 
 # ---------------------------------------------------------------
