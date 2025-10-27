@@ -3,6 +3,7 @@ from collections import OrderedDict
 
 import astropy.units as u
 import numpy as np
+from astropy.coordinates import EarthLocation, get_body
 from astropy.stats import gaussian_fwhm_to_sigma
 from astropy.table import QTable
 from astropy.time import Time, TimeDelta
@@ -179,57 +180,12 @@ def tso_aperture_photometry(
     # initialize the output table
     tbl = QTable(meta=meta)
 
-    # check for the INT_TIMES table extension
-    if datamodel.hasattr("int_times") and datamodel.int_times is not None:
-        nrows = len(datamodel.int_times)
-    else:
-        nrows = 0
-        log.warning("The INT_TIMES table in the input file is missing or empty.")
-
-    # load the INT_TIMES table data
-    if nrows > 0:
-        shape = datamodel.data.shape
-        num_integ = 1
-        if len(shape) > 2:
-            num_integ = shape[0]
-        int_start = datamodel.meta.exposure.integration_start
-        if int_start is None:
-            int_start = 1
-            log.warning(f"INTSTART not found; assuming a value of {int_start}")
-
-        # Columns of integration numbers & times of integration from the
-        # INT_TIMES table.
-        int_num = datamodel.int_times["integration_number"]
-        mid_utc = datamodel.int_times["int_mid_MJD_UTC"]
-        offset = int_start - int_num[0]  # both are one-indexed
-        if offset < 0:
-            log.warning(
-                "Range of integration numbers in science data extends "
-                "outside the range in INT_TIMES table."
-            )
-            log.warning("Can't use INT_TIMES table.")
-            del int_num, mid_utc
-            nrows = 0  # flag as bad
-        else:
-            log.debug("Times are from the INT_TIMES table")
-            time_arr = mid_utc[offset : offset + num_integ]
-            int_times = Time(time_arr, format="mjd", scale="utc")
-
-    if nrows == 0:
-        # No int_times available.
-        # Compute integration time stamps on the fly
-        log.debug("Times computed from EXPSTART and EFFINTTM")
-        dt = datamodel.meta.exposure.integration_time
-        n_dt = (
-            datamodel.meta.exposure.integration_end - datamodel.meta.exposure.integration_start + 1
-        )
-        dt_arr = np.arange(1, 1 + n_dt) * dt - (dt / 2.0)
-        int_dt = TimeDelta(dt_arr, format="sec")
-        int_times = Time(datamodel.meta.exposure.start_time, format="mjd") + int_dt
+    int_times_utc, int_times_bjd = _get_int_times(datamodel)
 
     # populate table columns
     unit = u.Unit(datamodel.meta.bunit_data)
-    tbl["MJD"] = int_times.mjd
+    tbl["MJD"] = int_times_utc.mjd
+    tbl["BJD_TDB"] = int_times_bjd.mjd
     tbl["aperture_sum"] = aperture_sum << unit
     tbl["aperture_sum_err"] = aperture_sum_err << unit
 
@@ -287,6 +243,129 @@ def tso_aperture_photometry(
         tbl["psf_flux"] = psf_flux << unit
 
     return tbl
+
+
+def _get_int_times(datamodel):
+    """
+    Find mid times of each integration.
+
+    If the int_times table is available in the datamodel, use that.
+    If not, approximate the times using exposure metadata.
+
+    Parameters
+    ----------
+    datamodel : ~stdatamodels.jwst.datamodels.CubeModel
+        The input data model.
+
+    Returns
+    -------
+    int_times_utc : ~astropy.time.Time
+        An array of integration mid-times in MJD UTC.
+    int_times_bjd : ~astropy.time.Time
+        An array of integration mid-times in BJD_TDB.
+    """
+    # check for the INT_TIMES table extension
+    if datamodel.hasattr("int_times") and datamodel.int_times is not None:
+        nrows = len(datamodel.int_times)
+    else:
+        nrows = 0
+        log.warning("The INT_TIMES table in the input file is missing or empty.")
+
+    # load the INT_TIMES table data
+    if nrows > 0:
+        shape = datamodel.data.shape
+        num_integ = 1
+        if len(shape) > 2:
+            num_integ = shape[0]
+        int_start = datamodel.meta.exposure.integration_start
+        if int_start is None:
+            int_start = 1
+            log.warning(f"INTSTART not found; assuming a value of {int_start}")
+
+        # Columns of integration numbers & times of integration from the
+        # INT_TIMES table.
+        int_num = datamodel.int_times["integration_number"]
+        mid_utc = datamodel.int_times["int_mid_MJD_UTC"]
+        mid_bjd = datamodel.int_times["int_mid_BJD_TDB"]
+        offset = int_start - int_num[0]  # both are one-indexed
+        if offset < 0:
+            log.warning(
+                "Range of integration numbers in science data extends "
+                "outside the range in INT_TIMES table."
+            )
+            log.warning("Can't use INT_TIMES table.")
+            del int_num, mid_utc, mid_bjd
+            nrows = 0  # flag as bad
+        else:
+            log.debug("Times are from the INT_TIMES table")
+            time_arr_utc = mid_utc[offset : offset + num_integ]
+            int_times_utc = Time(time_arr_utc, format="mjd", scale="utc")
+            time_arr_bjd = mid_bjd[offset : offset + num_integ]
+            int_times_bjd = Time(time_arr_bjd, format="mjd", scale="tdb")
+
+    if nrows == 0:
+        # No int_times available.
+        # Compute integration time stamps on the fly
+        log.debug("Times computed from EXPSTART and EFFINTTM")
+        dt = datamodel.meta.exposure.integration_time
+        n_dt = (
+            datamodel.meta.exposure.integration_end - datamodel.meta.exposure.integration_start + 1
+        )
+        dt_arr = np.arange(1, 1 + n_dt) * dt - (dt / 2.0)
+        int_dt = TimeDelta(dt_arr, format="sec")
+        int_times_utc = Time(datamodel.meta.exposure.start_time, format="mjd") + int_dt
+
+        # Convert to BJD TDB using target coordinates and L2 location
+        from astropy.coordinates import SkyCoord
+
+        target_coord = SkyCoord(
+            ra=datamodel.meta.target.ra * u.deg, dec=datamodel.meta.target.dec * u.deg, frame="icrs"
+        )
+
+        jwst_location = _approx_l2_position(int_times_utc[0])
+        delta = int_times_utc.light_travel_time(target_coord, location=jwst_location)
+        int_times_bjd = int_times_utc.tdb + delta
+
+    return int_times_utc, int_times_bjd
+
+
+def _approx_l2_position(time):
+    """
+    Approximate JWST's position at L2 at the given time.
+
+    Parameters
+    ----------
+    time : ~astropy.time.Time
+        The time at which to compute JWST's position.
+
+    Returns
+    -------
+    jwst_location : ~astropy.coordinates.EarthLocation
+        The approximate location of JWST at L2.
+    """
+    # Calculate JWST's approximate location at L2
+    # L2 is approximately 1.5 million km from Earth in the anti-solar direction
+    # Get Earth-Sun vector to determine anti-solar direction
+    earth_pos = get_body("earth", time, ephemeris="builtin")
+    sun_pos = get_body("sun", time, ephemeris="builtin")
+
+    # Vector from Sun to Earth (normalized)
+    earth_sun_vec = earth_pos.cartesian.xyz - sun_pos.cartesian.xyz
+    earth_sun_unit = earth_sun_vec / np.linalg.norm(earth_sun_vec)
+
+    # L2 is 1.5 million km beyond Earth in the anti-solar direction
+    l2_offset_xyz = earth_sun_unit * 1.5e6 * u.km
+
+    # Add the offset to Earth's position
+    l2_xyz = earth_pos.cartesian.xyz + l2_offset_xyz
+
+    # Convert to EarthLocation (this is an approximation since EarthLocation
+    # assumes points are on/near Earth, but it works for the light travel time calc)
+    jwst_location = EarthLocation.from_geocentric(
+        l2_xyz[0].to(u.m), l2_xyz[1].to(u.m), l2_xyz[2].to(u.m)
+    )
+
+    return jwst_location
 
 
 def _fit_source(data, mask, source_mask, xcenter, ycenter, box_size, fit_psf=False):
