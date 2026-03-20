@@ -34,7 +34,7 @@ from jwst.lib import reffile_utils
 log = logging.getLogger(__name__)
 
 
-__all__ = ["create_pipeline", "imaging", "tsgrism", "wfss"]
+__all__ = ["create_pipeline", "dhs", "imaging", "tsgrism", "wfss"]
 
 
 def create_pipeline(input_model, reference_files):
@@ -397,7 +397,7 @@ def dhs(input_model, reference_files):
     Returns
     -------
     pipeline : list
-        The WCS pipeline, suitable for input into `gwcs.WCS`.
+        The WCS pipeline, suitable for input into `gwcs.wcs.WCS`.
 
     Notes
     -----
