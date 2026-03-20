@@ -217,6 +217,11 @@ For WFSS modes (``NIS_WFSS``, ``NRC_WFSS``), an approximation of the GWCS object
 associated with a direct image with the same instrument configuration as the grism image
 is saved as FITS WCS in the headers of grism images.
 
+WCS of substripe (DHS) and superstripe exposures
+------------------------------------------------
+
+ADD HERE
+
 Corrections Due to Spacecraft Motion
 ------------------------------------
 
