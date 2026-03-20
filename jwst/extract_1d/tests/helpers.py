@@ -167,6 +167,8 @@ def mock_nirspec_fs_one_slit_func():
     model.meta.wcs = simple_wcs_func()
 
     model.data = np.arange(50 * 50, dtype=float).reshape((50, 50))
+    model.dq = model.get_default("dq")
+    model.err = model.data * 0.02
     model.var_poisson = model.data * 0.02
     model.var_rnoise = model.data * 0.02
     model.var_flat = model.data * 0.05
@@ -229,6 +231,8 @@ def mock_nirspec_bots_func():
     model.meta.aperture.position_angle = 150.0
 
     model.data = np.arange(10 * 50 * 50, dtype=float).reshape((10, 50, 50))
+    model.dq = model.get_default("dq")
+    model.err = model.data * 0.02
     model.var_poisson = model.data * 0.02
     model.var_rnoise = model.data * 0.02
     model.var_flat = model.data * 0.05
@@ -520,6 +524,8 @@ def mock_nircam_dhs():
         submodel.meta.wcs = simple_wcs_func()
 
         submodel.data = np.arange(intend * 50 * 50, dtype=float).reshape((intend, 50, 50))
+        submodel.dq = submodel.get_default("dq")
+        submodel.err = submodel.data * 0.02
         submodel.var_poisson = submodel.data * 0.02
         submodel.var_rnoise = submodel.data * 0.02
         submodel.var_flat = submodel.data * 0.05
