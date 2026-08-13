@@ -213,14 +213,14 @@ def _validate_orders_against_reference(orders, spec_orders):
     return orders[good_orders]
 
 
-def _validate_orders_against_transform(wcs, spec_orders):
+def _validate_orders_against_transform(grism_transform, spec_orders):
     """
     Ensure the requested spectral orders are defined in the WCS transforms.
 
     Parameters
     ----------
-    wcs : gwcs.wcs.WCS
-        The input MultiSlitModel's WCS object.
+    grism_transform : list[`~astropy.modeling.Model`]
+        The input MultiSlitModel's grism-to-sky WCS transform.
     spec_orders : list[int]
         The list of requested spectral orders.
 
@@ -229,9 +229,8 @@ def _validate_orders_against_transform(wcs, spec_orders):
     list
         List of spectral orders that are defined in the WCS transform.
     """
-    sky_to_grism = wcs.backward_transform
     good_orders = spec_orders.copy()
-    for model in sky_to_grism:
+    for model in grism_transform:
         if isinstance(model, (NIRCAMBackwardGrismDispersion, NIRISSBackwardGrismDispersion)):
             # Get the orders defined in the transform
             orders = np.sort(model.orders)
@@ -693,14 +692,16 @@ def contam_corr(
     # The "detector" to "grism_detector" and "world" to "detector" transforms are identical
     # for all slits, so just use the first one. The "grism_detector" to "grism_slit"
     # transform is not used by the step.
-    grism_wcs = input_model.slits[0].meta.wcs
+    grism_wcs = input_model.meta.wcs
 
     # Find out how many spectral orders are defined based on the
     # array of order values in the Wavelengthrange ref file,
     # then constrain the orders to the user-specified ones
     spec_orders = np.asarray(waverange.order)
     spec_orders = _validate_orders_against_reference(orders, spec_orders)
-    spec_orders = _validate_orders_against_transform(grism_wcs, spec_orders)
+    spec_orders = _validate_orders_against_transform(
+        grism_wcs.get_transform("world", "grism_detector"), spec_orders
+    )
     if len(spec_orders) == 0:
         log.error("No valid spectral orders found. Step will be SKIPPED.")
         return input_model, None, None, None

@@ -3,10 +3,13 @@
 import copy
 import logging
 
+import astropy.units as u
 import numpy as np
 from astropy.coordinates import SkyCoord
-from astropy.modeling import CompoundModel, bind_bounding_box
-from astropy.modeling.models import Const1D, Mapping, Shift
+from astropy.modeling import CompoundModel, bind_compound_bounding_box
+from astropy.modeling.models import Const1D, Identity, Mapping, Shift
+from gwcs import coordinate_frames as cf
+from gwcs.selector import LabelMapper, RegionsSelector
 from gwcs.utils import to_index
 from gwcs.wcstools import grid_from_bounding_box
 from stcal.alignment.util import wcs_bbox_from_shape
@@ -681,6 +684,7 @@ def extract_grism_objects(
     # sid: catalog ID of the object
 
     slits = []
+    order_transforms = {}
     for obj in grism_objects:
         for order in obj.order_bounding.keys():
             # Add the shift to the lower corner to each subarray WCS object
@@ -704,7 +708,6 @@ def extract_grism_objects(
             # this means that it was identified as a partial order but only on one
             # row or column of the detector
             if ymax - ymin > 0 and xmax - xmin > 0:
-                subwcs = copy.deepcopy(inwcs)
                 log.info(f"Subarray extracted for obj: {obj.sid} order: {order}:")
                 log.info(
                     f"Subarray extents are: (xmin:{xmin}, xmax:{xmax}), (ymin:{ymin}, ymax:{ymax})"
@@ -741,23 +744,18 @@ def extract_grism_objects(
                 else:
                     var_flat = None
 
-                # Add a new transform to the WCS that shifts to the center of the virtual slit
-                # This needs to be separated from the "grism_detector"/("dispersed_detector")
-                # to "detector" transform  because the un-shifted "grism_detector" to "detector"
-                # transform is used by wfss_contam
-
+                # This transform shifts to the center of the virtual slit. It needs
+                # to be separated from the "grism_detector"/("dispersed_detector")
+                # to "detector" transform because the un-shifted "grism_detector" to
+                # "detector" transform is used by wfss_contam.
                 tr = Mapping((0, 1, 0, 0, 0)) | (
                     Shift(xmin) & Shift(ymin) & xcenter_model & ycenter_model & order_model
                 )
-                bind_bounding_box(
-                    tr, util.transform_bbox_from_shape(ext_data.shape, order="F"), order="F"
-                )
+                bbox = util.transform_bbox_from_shape(ext_data.shape, order="F")
 
-                grism_slit = copy.deepcopy(subwcs.grism_detector)
-                grism_slit.name = "grism_slit"
-                subwcs.insert_frame(
-                    input_frame=grism_slit, output_frame="grism_detector", transform=tr
-                )
+                # collect the transforms for each order and source_id to build
+                # the selector transforms for the MultiSlitModel WCS.
+                order_transforms.setdefault(obj.sid, {})[order] = (tr, bbox)
 
                 new_slit = datamodels.SlitModel(
                     data=ext_data,
@@ -774,11 +772,6 @@ def extract_grism_objects(
                 )
                 new_slit.meta.wcsinfo.specsys = input_model.meta.wcsinfo.specsys
                 new_slit.meta.coordinates = input_model.meta.coordinates
-                new_slit.meta.wcs = subwcs
-
-                if compute_wavelength:
-                    log.debug("Computing wavelengths")
-                    new_slit.wavelength = compute_wfss_wavelength(new_slit)
 
                 # set x/ystart values relative to the image (screen) frame.
                 # The overall subarray offset is recorded in model.meta.subarray.
@@ -797,26 +790,106 @@ def extract_grism_objects(
                 new_slit.meta.bunit_data = input_model.meta.bunit_data
                 new_slit.meta.bunit_err = input_model.meta.bunit_err
                 slits.append(new_slit)
+
+    if order_transforms:
+        wcs = _build_shared_grism_wcs(inwcs, order_transforms)
+        output_model.meta.wcs = wcs
+        if compute_wavelength:
+            for new_slit in slits:
+                new_slit.wavelength = compute_wfss_wavelength(
+                    wcs, new_slit.source_id, new_slit.meta.wcsinfo.spectral_order
+                )
+
     output_model.slits.extend(slits)
 
     # update s_region of 0th slit to match input model
     if output_model.slits:
         output_model.slits[0].meta.wcsinfo.s_region = input_model.meta.wcsinfo.s_region
 
-    # In the case that there are no spectra to extract deleting the variables
-    # will fail so add the try block.
-    try:
-        del subwcs
-    except UnboundLocalError:
-        pass
-    try:
-        del new_slit
-    except UnboundLocalError:
-        pass
-    # del subwcs
-    # del new_slit
     log.info("Finished extractions")
     return output_model
+
+
+def _build_shared_grism_wcs(inwcs, order_transforms):
+    """
+    Build the WCS for a MultiSlitModel with many cutouts from a grism observation.
+
+    All source cutouts ("slits") share one WCS. Its "grism_slit" input
+    frame takes two additional inputs, ``source_id`` and ``order``, which
+    are used by a nested pair of `~gwcs.selector.RegionsSelector` transforms
+    to pick out the appropriate shift transforms for each source/order combination.
+
+    Parameters
+    ----------
+    inwcs : `~gwcs.wcs.WCS`
+        The input full-frame grism image WCS.
+    order_transforms : dict
+        Mapping of ``{source_id: {order: (transform, bbox)}}`` where
+        ``transform`` is the 2-input, 5-output shift/offset transform for
+        that source/order, and ``bbox`` is its local (x, y) bounding box.
+
+    Returns
+    -------
+    subwcs : `~gwcs.wcs.WCS`
+        A single WCS, shared by every extracted slit, whose "grism_slit"
+        input frame accepts (x, y, source_id, order).
+    """
+    bounding_boxes = {}
+    source_selector = {}
+    for source_id, orders in order_transforms.items():
+        order_selector = {}
+        for order, (tr, bbox) in orders.items():
+            # RegionsSelector always calls the selected transform with all
+            # of its declared inputs, so pad `tr` to accept
+            # (x, y, source_id, order) and drop the last two.
+            order_selector[order] = Mapping((0, 1), n_inputs=4) | tr
+            bounding_boxes[(source_id, order)] = bbox
+
+        order_label_mapper = LabelMapper(
+            inputs=("x", "y", "source_id", "order"),
+            mapper=Identity(1),
+            inputs_mapping=Mapping((3,), n_inputs=4),
+        )
+        source_selector[source_id] = RegionsSelector(
+            inputs=("x", "y", "source_id", "order"),
+            outputs=("x0", "y0", "xc", "yc", "order"),
+            label_mapper=order_label_mapper,
+            selector=order_selector,
+        )
+
+    source_label_mapper = LabelMapper(
+        inputs=("x", "y", "source_id", "order"),
+        mapper=Identity(1),
+        inputs_mapping=Mapping((2,), n_inputs=4),
+    )
+    grism_slit_to_detector = RegionsSelector(
+        inputs=("x", "y", "source_id", "order"),
+        outputs=("x0", "y0", "xc", "yc", "order"),
+        label_mapper=source_label_mapper,
+        selector=source_selector,
+    )
+    bind_compound_bounding_box(
+        grism_slit_to_detector,
+        bounding_boxes,
+        selector_args=[(2, True), (3, True)],  # 2=source_id, 3=order
+        order="F",
+    )
+
+    grism_slit = cf.CoordinateFrame(
+        naxes=4,
+        # gwcs only recognizes "SPATIAL"/"SPECTRAL"/"TIME" axes_type.
+        # just use spatial for the selector axes
+        axes_type=("SPATIAL", "SPATIAL", "SPATIAL", "SPATIAL"),
+        axes_order=(0, 1, 2, 3),
+        unit=(u.pix, u.pix, u.dimensionless_unscaled, u.dimensionless_unscaled),
+        axes_names=("x", "y", "source_id", "order"),
+        name="grism_slit",
+    )
+    subwcs = copy.deepcopy(inwcs)
+    subwcs.insert_frame(
+        input_frame=grism_slit, output_frame="grism_detector", transform=grism_slit_to_detector
+    )
+    return subwcs
 
 
 def compute_dispersion(wcs):
@@ -917,23 +990,34 @@ def compute_tso_offset_center(
     return xc, yc
 
 
-def compute_wfss_wavelength(slit):
+def compute_wfss_wavelength(wcs, source_id, order):
     """
-    Compute the wavelength array for a slit with WCS.
+    Compute the wavelength array for one virtual slit of a shared grism WCS.
 
     Parameters
     ----------
-    slit : `~stdatamodels.jwst.datamodels.SlitModel`
-        JWST slit datamodel containing a ``meta.wcs`` that is a
-        `~gwcs.wcs.WCS` object
+    wcs : `~gwcs.wcs.WCS`
+        The shared multi-slit grism WCS (see `_build_shared_grism_wcs`),
+        whose "grism_slit" input frame accepts (x, y, source_id, order).
+    source_id : int
+        The catalog source ID of the slit.
+    order : int
+        The spectral order of the slit.
 
     Returns
     -------
     wavelength : ndarray
         The wavelength array
     """
-    x, y = grid_from_bounding_box(slit.meta.wcs.bounding_box)
-    wavelength = slit.meta.wcs(x, y)[2]
+    bbox = wcs.bounding_box[(source_id, order)]
+    x, y = grid_from_bounding_box(bbox)
+    # RegionsSelector does not broadcast its inputs, so source_id and order
+    # must already match the shape of x and y. The (x, y) grid is already
+    # restricted to this slit's bounding box, so bypass the compound
+    # bounding box's own (non-broadcasting) selector lookup here.
+    sid = np.full_like(x, source_id)
+    order_arr = np.full_like(x, order)
+    wavelength = wcs(x, y, sid, order_arr, with_bounding_box=False)[2]
     return wavelength
 
 
