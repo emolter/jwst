@@ -324,7 +324,14 @@ class ApCorrPhase(ApCorrBase):
             Use ``self.tabulated_correction`` to perform the aperture correction?
             Default is `False` (recompute correction from scratch).
         """
-        flux_cols_to_correct = ("flux", "flux_error", "surf_bright", "sb_error")
+        flux_cols_to_correct = (
+            "flux",
+            "flux_error",
+            "surf_bright",
+            "sb_error",
+            "contam",
+            "contam_surf_bright",
+        )
         var_cols_to_correct = (
             "flux_var_poisson",
             "flux_var_rnoise",
@@ -342,7 +349,8 @@ class ApCorrPhase(ApCorrBase):
                 )
 
             for col in flux_cols_to_correct:
-                spec_table[col] *= self.tabulated_correction
+                if col in spec_table:
+                    spec_table[col] *= self.tabulated_correction
             for col in var_cols_to_correct:
                 spec_table[col] *= self.tabulated_correction**2
         else:
@@ -356,7 +364,8 @@ class ApCorrPhase(ApCorrBase):
 
                 if correction:
                     for col in flux_cols_to_correct:
-                        row[col] *= correction.item()
+                        if col in row:
+                            row[col] *= correction.item()
                     for col in var_cols_to_correct:
                         row[col] *= correction.item() * correction.item()
 
