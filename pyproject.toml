@@ -22,6 +22,7 @@ dependencies = [
     "BayesicFitting>=3.2.2",
     "crds>=12.0.4,!=13.1.15",
     "gwcs>=1.0.3,<2",
+    "numba>=0.60",
     "numpy>=2.0",
     "photutils>=3.0,<4",
     "pyyaml>=6.0.1",

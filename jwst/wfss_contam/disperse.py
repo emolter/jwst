@@ -2,6 +2,7 @@ import logging
 import multiprocessing as mp
 import warnings
 
+import numba as nb
 import numpy as np
 from astropy.modeling.mappings import Mapping
 from scipy.interpolate import interp1d
@@ -10,6 +11,31 @@ from jwst.lib.winclip import get_clipped_pixels
 from jwst.wfss_contam.sens1d import create_1d_sens
 
 log = logging.getLogger(__name__)
+
+
+@nb.njit(cache=True)
+def _gather_by_index(lambdas_flat, fluxes_flat, source_ids_flat, index, lam_out, flux_out, sid_out):
+    """
+    Gather ``lambdas``, ``fluxes``, and ``source_ids`` at ``index`` in a single fused pass.
+
+    Equivalent to calling ``np.take`` three times, but avoids doing three separate
+    full-array gather passes over the (potentially large) input arrays.
+
+    Parameters
+    ----------
+    lambdas_flat, fluxes_flat, source_ids_flat : np.ndarray
+        Flattened 1-D input arrays to gather from.
+    index : np.ndarray
+        Flat indices into the input arrays, as returned by ``get_clipped_pixels``.
+    lam_out, flux_out, sid_out : np.ndarray
+        Pre-allocated output arrays of the same shape as ``index``, filled in place.
+    """
+    n = index.shape[0]
+    for i in range(n):
+        idx = index[i]
+        lam_out[i] = lambdas_flat[idx]
+        flux_out[i] = fluxes_flat[idx]
+        sid_out[i] = source_ids_flat[idx]
 
 
 __all__ = ["disperse"]
@@ -133,6 +159,93 @@ def _disperse_onto_grism(
     return x0s, y0s, lambdas
 
 
+@nb.njit(cache=True)
+def _group_bounds(xs, ys, group_idx, n_groups):
+    """
+    Compute per-group (per-source) min/max x, y bounds in a single pass over all pixels.
+
+    Replaces ``np.minimum.reduceat``/``np.maximum.reduceat``, which require the input
+    to already be sorted and grouped; this works on pixels in their original order.
+
+    Parameters
+    ----------
+    xs, ys : np.ndarray
+        Detector x, y position of each pixel.
+    group_idx : np.ndarray
+        Group (source) index of each pixel, shape ``(n_pixels,)``.
+    n_groups : int
+        Total number of groups (sources).
+
+    Returns
+    -------
+    minxs, maxxs, minys, maxys : np.ndarray
+        Per-group bounds, shape ``(n_groups,)``.
+    """
+    minxs = np.full(n_groups, xs[0])
+    maxxs = np.full(n_groups, xs[0])
+    minys = np.full(n_groups, ys[0])
+    maxys = np.full(n_groups, ys[0])
+    seen = np.zeros(n_groups, dtype=np.bool_)
+    for i in range(xs.shape[0]):
+        g = group_idx[i]
+        x = xs[i]
+        y = ys[i]
+        if not seen[g]:
+            minxs[g] = x
+            maxxs[g] = x
+            minys[g] = y
+            maxys[g] = y
+            seen[g] = True
+        else:
+            if x < minxs[g]:
+                minxs[g] = x
+            if x > maxxs[g]:
+                maxxs[g] = x
+            if y < minys[g]:
+                minys[g] = y
+            if y > maxys[g]:
+                maxys[g] = y
+    return minxs, maxxs, minys, maxys
+
+
+@nb.njit(cache=True)
+def _accumulate_by_group(xs, ys, values, group_idx, minxs, minys, widths, offsets, out):
+    """
+    Scatter-accumulate pixel values into per-group (per-source) output buffers.
+
+    All groups' output images are packed into a single flat ``out`` buffer (one row
+    per channel), at the offsets precomputed for each group. This does the work of
+    calling ``np.bincount`` once per source in a single fused pass over every pixel,
+    for every channel (flux plus any basis-model channels) at once.
+
+    Parameters
+    ----------
+    xs, ys : np.ndarray
+        Detector x, y position of each pixel, in any order.
+    values : np.ndarray
+        2-D array of shape ``(n_channels, n_pixels)`` with the per-pixel values to
+        accumulate for each channel (e.g. flux, then one row per basis model).
+    group_idx : np.ndarray
+        Group (source) index of each pixel, shape ``(n_pixels,)``.
+    minxs, minys : np.ndarray
+        Per-group minimum x, y position, shape ``(n_groups,)``.
+    widths : np.ndarray
+        Per-group image width (in pixels), shape ``(n_groups,)``.
+    offsets : np.ndarray
+        Per-group starting offset into the flat ``out`` buffer, shape ``(n_groups,)``.
+    out : np.ndarray
+        2-D array of shape ``(n_channels, total_size)``, zeroed and filled in place.
+    """
+    n_pixels = xs.shape[0]
+    n_channels = values.shape[0]
+    for i in range(n_pixels):
+        g = group_idx[i]
+        local_idx = (ys[i] - minys[g]) * widths[g] + (xs[i] - minxs[g])
+        flat_idx = offsets[g] + local_idx
+        for c in range(n_channels):
+            out[c, flat_idx] += values[c, i]
+
+
 def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_counts=None):
     """
     Collect the dispersed pixel values into separate images for each source.
@@ -146,7 +259,8 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
     counts : ndarray
         Count rates of dispersed pixels
     source_ids_per_pixel : int array
-        Source IDs of the dispersed pixels
+        Source IDs of the dispersed pixels. Must be non-negative (background/0 pixels
+        are expected to already be filtered out upstream).
     model_counts : list of ndarray, optional
         List of count rate arrays corresponding to input ``basis_models``
 
@@ -155,70 +269,54 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
     outputs_by_source : dict
         Dictionary containing dispersed images and bounds for each source ID
     """
-    # First sort by source ID. xs, ys input here cannot be assumed sorted after get_clipped_pixels
-    sort_idx = np.argsort(source_ids_per_pixel)
-    sorted_ids = source_ids_per_pixel[sort_idx]
-    sorted_xs = xs[sort_idx]
-    sorted_ys = ys[sort_idx]
-    sorted_counts = counts[sort_idx]
-    if model_counts is not None and len(model_counts) > 0:
-        sorted_model_counts = [mc[sort_idx] for mc in model_counts]
+    if source_ids_per_pixel.size == 0:
+        return {}
+    has_models = model_counts is not None and len(model_counts) > 0
 
-    # Compute per-source bounds in a vectorized way
-    unique_ids, split_points = np.unique(sorted_ids, return_index=True)
-    minxs = np.minimum.reduceat(sorted_xs, split_points)
-    maxxs = np.maximum.reduceat(sorted_xs, split_points)
-    minys = np.minimum.reduceat(sorted_ys, split_points)
-    maxys = np.maximum.reduceat(sorted_ys, split_points)
+    # Map each pixel directly to a dense group (source) index without sorting: since
+    # source IDs are small non-negative integers, np.bincount + cumsum over the (much
+    # smaller) range of possible IDs is O(n_ids + n_pixels), avoiding the O(n_pixels *
+    # log(n_pixels)) cost of np.argsort, and avoiding reordering xs/ys/counts at all.
+    id_present = np.bincount(source_ids_per_pixel) > 0
+    unique_ids = np.flatnonzero(id_present)
+    n_groups = len(unique_ids)
+    id_to_group = np.cumsum(id_present) - 1
+    group_idx = id_to_group[source_ids_per_pixel]
 
-    # Now loop through sources, build the output images, and store bounds
-    # to reconstruct the full dispersed image later
+    minxs, maxxs, minys, maxys = _group_bounds(xs, ys, group_idx, n_groups)
+    widths = maxxs - minxs + 1
+    heights = maxys - minys + 1
+    sizes = widths * heights
+    offsets = np.concatenate(([0], np.cumsum(sizes)))[:-1]
+    total_size = int(sizes.sum())
+
+    # Stack flux plus all basis-model channels so every source's image (and every
+    # model_counts image) is accumulated in a single fused pass over all pixels.
+    n_channels = 1 + (len(model_counts) if has_models else 0)
+    values = np.empty((n_channels, len(xs)), dtype=counts.dtype)
+    values[0] = counts
+    if has_models:
+        for k, mc in enumerate(model_counts):
+            values[k + 1] = mc
+
+    combined = np.zeros((n_channels, total_size), dtype=counts.dtype)
+    _accumulate_by_group(xs, ys, values, group_idx, minxs, minys, widths, offsets, combined)
+
     outputs_by_source = {}
     for i, this_sid in enumerate(unique_ids):
-        start = split_points[i]
-        end = split_points[i + 1] if i + 1 < len(split_points) else len(sorted_xs)
-        this_xs = sorted_xs[start:end]
-        this_ys = sorted_ys[start:end]
-        this_flxs = sorted_counts[start:end]
-
+        start = offsets[i]
+        end = start + sizes[i]
         bounds = [int(minxs[i]), int(maxxs[i]), int(minys[i]), int(maxys[i])]
-        img = _build_dispersed_image_of_source(this_xs, this_ys, this_flxs, bounds)
         outputs_by_source[this_sid] = {
             "bounds": bounds,
-            "image": img,
+            "image": combined[0, start:end].reshape(heights[i], widths[i]),
         }
-        if model_counts is not None and len(model_counts) > 0:
+        if has_models:
             outputs_by_source[this_sid]["model_counts"] = [
-                _build_dispersed_image_of_source(this_xs, this_ys, mc[start:end], bounds)
-                for mc in sorted_model_counts
+                combined[k + 1, start:end].reshape(heights[i], widths[i])
+                for k in range(len(model_counts))
             ]
     return outputs_by_source
-
-
-def _build_dispersed_image_of_source(x, y, flux, bounds):
-    """
-    Convert a flattened list of pixels to a 2-D grism image of that source.
-
-    Parameters
-    ----------
-    x : ndarray
-        X coordinates of pixels in the grism image
-    y : ndarray
-        Y coordinates of pixels in the grism image
-    flux : ndarray
-        Fluxes of pixels in the grism image
-    bounds : list
-        Pre-computed [minx, maxx, miny, maxy] bounds for the source.
-
-    Returns
-    -------
-    a : ndarray
-        2-D dispersed image of the source
-    """
-    minx, maxx, miny, maxy = bounds
-    img = np.zeros((maxy - miny + 1, maxx - minx + 1), dtype=flux.dtype)
-    np.add.at(img, (y - miny, x - minx), flux)
-    return img
 
 
 def _replace_nans(fluxes):
@@ -446,12 +544,21 @@ def disperse(
     xs, ys, areas, index = get_clipped_pixels(x0s, y0s, padding, naxis[0], naxis[1], width, height)
     del x0s, y0s
 
-    lambdas = np.take(lambdas, index)
-    fluxes = np.take(fluxes, index)
-    source_ids_per_pixel = np.take(source_ids_per_pixel, index)
+    # Gather lambdas, fluxes, and source_ids_per_pixel at `index` in a single fused
+    # pass instead of three separate np.take calls.
+    lambdas_flat = lambdas.ravel()
+    fluxes_flat = fluxes.ravel()
+    source_ids_flat = source_ids_per_pixel.ravel()
+    n_index = index.shape[0]
+    lambdas = np.empty(n_index, dtype=lambdas_flat.dtype)
+    fluxes = np.empty(n_index, dtype=fluxes_flat.dtype)
+    source_ids_per_pixel = np.empty(n_index, dtype=source_ids_flat.dtype)
+    _gather_by_index(
+        lambdas_flat, fluxes_flat, source_ids_flat, index, lambdas, fluxes, source_ids_per_pixel
+    )
 
     # Evaluate basis models on the 1-D lambda array.
-    # even after np.take this is element-wise so this is still full resolution
+    # even after gathering this is element-wise so this is still full resolution
     model_f = []
     if basis_models is not None:
         for flam in basis_models:

@@ -1,10 +1,78 @@
 """Grid-based lookup table that speeds up the grism trace shape computation."""
 
+import numba as nb
 import numpy as np
 from astropy.modeling.mappings import Mapping
 from scipy.interpolate import RegularGridInterpolator
 
 __all__ = ["TraceLUT", "build_trace_lut"]
+
+
+@nb.njit(cache=True)
+def _separable_interp_numba(dx_grid, dy_grid, ix, wx, iy, wy, ilam, wlam):
+    """
+    Fused bilinear-in-(x0, y0), then linear-in-wavelength interpolation of dx_grid, dy_grid.
+
+    Computes both dx and dy in a single pass, reusing the per-pixel bilinear weights,
+    and without materializing any of the (n_pixels, n_wave_grid) intermediate arrays
+    that the equivalent pure-numpy implementation would require.
+
+    Parameters
+    ----------
+    dx_grid, dy_grid : np.ndarray
+        3-D arrays of shape ``(len(x0_grid), len(y0_grid), len(lam_grid))``.
+    ix, wx : np.ndarray
+        Lower indices and fractional weights for the x0 grid, shape ``(n_pixels,)``.
+    iy, wy : np.ndarray
+        Lower indices and fractional weights for the y0 grid, shape ``(n_pixels,)``.
+    ilam, wlam : np.ndarray
+        Lower indices and fractional weights for the wavelength grid, shape ``(n_wave,)``.
+
+    Returns
+    -------
+    dx_out, dy_out : np.ndarray
+        Arrays of shape ``(n_wave, n_pixels)`` giving the interpolated offsets.
+    """
+    n_pixels = ix.shape[0]
+    n_wave_grid = dx_grid.shape[2]
+    n_wave_query = ilam.shape[0]
+    dx_out = np.empty((n_wave_query, n_pixels))
+    dy_out = np.empty((n_wave_query, n_pixels))
+    dx_curve = np.empty(n_wave_grid)
+    dy_curve = np.empty(n_wave_grid)
+
+    for p in range(n_pixels):
+        i0 = ix[p]
+        i1 = i0 + 1
+        j0 = iy[p]
+        j1 = j0 + 1
+        w00 = (1.0 - wx[p]) * (1.0 - wy[p])
+        w10 = wx[p] * (1.0 - wy[p])
+        w01 = (1.0 - wx[p]) * wy[p]
+        w11 = wx[p] * wy[p]
+
+        for k in range(n_wave_grid):
+            dx_curve[k] = (
+                w00 * dx_grid[i0, j0, k]
+                + w10 * dx_grid[i1, j0, k]
+                + w01 * dx_grid[i0, j1, k]
+                + w11 * dx_grid[i1, j1, k]
+            )
+            dy_curve[k] = (
+                w00 * dy_grid[i0, j0, k]
+                + w10 * dy_grid[i1, j0, k]
+                + w01 * dy_grid[i0, j1, k]
+                + w11 * dy_grid[i1, j1, k]
+            )
+
+        for q in range(n_wave_query):
+            l0 = ilam[q]
+            l1 = l0 + 1
+            wl = wlam[q]
+            dx_out[q, p] = dx_curve[l0] * (1.0 - wl) + dx_curve[l1] * wl
+            dy_out[q, p] = dy_curve[l0] * (1.0 - wl) + dy_curve[l1] * wl
+
+    return dx_out, dy_out
 
 
 class TraceLUT:
@@ -36,8 +104,10 @@ class TraceLUT:
         self._x0_grid = np.asarray(x0_grid)
         self._y0_grid = np.asarray(y0_grid)
         self._lam_grid = np.asarray(lam_grid)
-        self._dx_grid = np.asarray(dx_grid)
-        self._dy_grid = np.asarray(dy_grid)
+        # Contiguous, with the wavelength axis last, so the inner loop of
+        # _separable_interp_numba (over the wavelength axis) has good cache locality.
+        self._dx_grid = np.ascontiguousarray(dx_grid)
+        self._dy_grid = np.ascontiguousarray(dy_grid)
 
         # Stack dx, dy into a single vector-valued interpolator so the grid-cell
         # lookup (the dominant cost) is only done once per query point instead of
@@ -107,16 +177,15 @@ class TraceLUT:
             Arrays of shape ``(n_wave, n_pixels)`` giving the interpolated dispersed
             pixel positions.
         """
-        x0 = np.asarray(x0)
-        y0 = np.asarray(y0)
-        wavelength = np.asarray(wavelength)
+        x0 = np.asarray(x0, dtype=np.float64)
+        y0 = np.asarray(y0, dtype=np.float64)
+        wavelength = np.asarray(wavelength, dtype=np.float64)
 
         ix, wx = self._cell_weights(self._x0_grid, x0)
         iy, wy = self._cell_weights(self._y0_grid, y0)
         ilam, wlam = self._cell_weights(self._lam_grid, wavelength)
 
-        dx = self._separable_interp(self._dx_grid, ix, wx, iy, wy, ilam, wlam)
-        dy = self._separable_interp(self._dy_grid, ix, wx, iy, wy, ilam, wlam)
+        dx, dy = _separable_interp_numba(self._dx_grid, self._dy_grid, ix, wx, iy, wy, ilam, wlam)
         return x0[np.newaxis, :] + dx, y0[np.newaxis, :] + dy
 
     @staticmethod
@@ -141,46 +210,6 @@ class TraceLUT:
         idx = np.clip(np.searchsorted(grid, values) - 1, 0, len(grid) - 2)
         w = (values - grid[idx]) / (grid[idx + 1] - grid[idx])
         return idx, w
-
-    @staticmethod
-    def _separable_interp(grid_vals, ix, wx, iy, wy, ilam, wlam):
-        """
-        Bilinear-in-(x0, y0), then linear-in-wavelength interpolation of ``grid_vals``.
-
-        Parameters
-        ----------
-        grid_vals : np.ndarray
-            3-D array of shape ``(len(x0_grid), len(y0_grid), len(lam_grid))``
-            containing the values to interpolate.
-        ix, wx : np.ndarray
-            Lower indices and fractional weights for the x0 grid.
-        iy, wy : np.ndarray
-            Lower indices and fractional weights for the y0 grid.
-        ilam, wlam : np.ndarray
-            Lower indices and fractional weights for the wavelength grid.
-
-        Returns
-        -------
-        interp_vals : np.ndarray
-            Interpolated values at the specified pixel and wavelength coordinates.
-        """
-        # Bilinear interpolation over x0, y0 across the full wavelength grid axis,
-        # done once per pixel rather than once per (pixel, wavelength) pair.
-        c00 = grid_vals[ix, iy, :]
-        c10 = grid_vals[ix + 1, iy, :]
-        c01 = grid_vals[ix, iy + 1, :]
-        c11 = grid_vals[ix + 1, iy + 1, :]
-        curve = (
-            c00 * ((1 - wx) * (1 - wy))[:, np.newaxis]
-            + c10 * (wx * (1 - wy))[:, np.newaxis]
-            + c01 * ((1 - wx) * wy)[:, np.newaxis]
-            + c11 * (wx * wy)[:, np.newaxis]
-        )  # shape (n_pixels, n_wave_grid)
-
-        # Linear interpolation along wavelength, shared across all pixels.
-        lo = curve[:, ilam]
-        hi = curve[:, ilam + 1]
-        return (lo * (1 - wlam)[np.newaxis, :] + hi * wlam[np.newaxis, :]).T
 
 
 def _native_wavelength_grid(imgxy_to_grismxy, order, wmin, wmax, x_ref, y_ref, oversample_factor=1):
@@ -301,7 +330,11 @@ def build_trace_lut(grism_wcs, order, wmin, wmax, naxis, n_grid, wave_oversample
 
     dx_grid = (xd - x0_rep).reshape(n_wave, n_grid, n_grid)
     dy_grid = (yd - y0_rep).reshape(n_wave, n_grid, n_grid)
-    dx_grid = np.moveaxis(dx_grid, 0, -1)
-    dy_grid = np.moveaxis(dy_grid, 0, -1)
+    # moveaxis alone only returns a strided view, leaving the wavelength axis (the
+    # inner loop of _separable_interp_numba) as the *largest*-stride axis. Force a
+    # contiguous copy so that axis is contiguous in memory, which matters a lot for
+    # the cache behavior of that tight loop.
+    dx_grid = np.ascontiguousarray(np.moveaxis(dx_grid, 0, -1))
+    dy_grid = np.ascontiguousarray(np.moveaxis(dy_grid, 0, -1))
 
     return TraceLUT(x0_grid, y0_grid, lam_grid, dx_grid, dy_grid)

@@ -3,7 +3,7 @@ from astropy.modeling.mappings import Mapping
 from numpy.testing import assert_allclose
 
 from jwst.wfss_contam.disperse import (
-    _build_dispersed_image_of_source,
+    _collect_outputs_by_source,
     _disperse_onto_grism,
     _replace_nans,
     disperse,
@@ -298,15 +298,38 @@ def test_flux_models_superposition(grism_wcs, direct_image_with_gradient):
     assert_allclose(combined, src_sum[_SOURCE_ID]["model_counts"][0], rtol=1e-10)
 
 
-def test_build_dispersed_image_of_source_accumulates_duplicates():
-    """Duplicate coordinates should sum their flux contributions."""
-    img = _build_dispersed_image_of_source(
-        x=np.array([0, 0, 1]),
-        y=np.array([0, 0, 1]),
-        flux=np.array([1.0, 2.0, 3.0]),
-        bounds=[0, 1, 0, 1],
+def test_collect_outputs_by_source_accumulates_duplicates():
+    """Duplicate coordinates within a source should sum their flux contributions."""
+    result = _collect_outputs_by_source(
+        xs=np.array([0, 0, 1]),
+        ys=np.array([0, 0, 1]),
+        counts=np.array([1.0, 2.0, 3.0]),
+        source_ids_per_pixel=np.array([7, 7, 7]),
     )
-    assert_allclose(img, np.array([[3.0, 0.0], [0.0, 3.0]]))
+    assert_allclose(result[7]["image"], np.array([[3.0, 0.0], [0.0, 3.0]]))
+
+
+def test_collect_outputs_by_source_empty():
+    """No input pixels should return an empty dict rather than raise."""
+    empty = np.array([], dtype=int)
+    result = _collect_outputs_by_source(empty, empty, np.array([]), empty)
+    assert result == {}
+
+
+def test_collect_outputs_by_source_groups_correctly():
+    """Unsorted, interleaved source IDs should be grouped into separate images/bounds."""
+    xs = np.array([5, 0, 5, 1])
+    ys = np.array([5, 0, 6, 1])
+    counts = np.array([1.0, 2.0, 3.0, 4.0])
+    source_ids = np.array([2, 1, 2, 1])
+
+    result = _collect_outputs_by_source(xs, ys, counts, source_ids)
+
+    assert set(result.keys()) == {1, 2}
+    assert result[1]["bounds"] == [0, 1, 0, 1]
+    assert_allclose(result[1]["image"], np.array([[2.0, 0.0], [0.0, 4.0]]))
+    assert result[2]["bounds"] == [5, 5, 5, 6]
+    assert_allclose(result[2]["image"], np.array([[1.0], [3.0]]))
 
 
 def test_replace_nans():
