@@ -10,6 +10,7 @@ from photutils.background import Background2D, MedianBackground
 from stdatamodels.jwst import datamodels
 
 from jwst.wfss_contam.disperse import disperse
+from jwst.wfss_contam.trace_lut import build_trace_lut
 
 log = logging.getLogger(__name__)
 
@@ -220,6 +221,7 @@ class Observation:
         selected_ids=None,
         max_pixels=1e5,
         basis_models=None,
+        trace_lut=None,
     ):
         """
         Chunk the sources into groups of max_pixels.
@@ -245,6 +247,9 @@ class Observation:
             Legendre polynomials from 1st order up to a given max order, e.g.
             [P1(x), P2(x), ...], the coefficients of which are linearly fit later.
             If None, no models are included in the output.
+        trace_lut : `~jwst.wfss_contam.trace_lut.TraceLUT`, optional
+            Precomputed lookup table for this spectral order, passed through to
+            ``disperse()`` for every chunk. If None, no lookup table is used.
 
         Returns
         -------
@@ -309,13 +314,22 @@ class Observation:
                     self.naxis,
                     self.oversample_factor,
                     basis_models,
+                    trace_lut,
                 ]
             )
 
         return disperse_args
 
     def disperse_order(
-        self, order, wmin, wmax, sens_waves, sens_response, selected_ids=None, basis_models=None
+        self,
+        order,
+        wmin,
+        wmax,
+        sens_waves,
+        sens_response,
+        selected_ids=None,
+        basis_models=None,
+        trace_lut=None,
     ):
         """
         Disperse the sources for a given spectral order, with multiprocessing.
@@ -340,7 +354,18 @@ class Observation:
             Flux distributions to evaluate at each wavelength. Typically these will be single
             polynomial orders, e.g. [lambda x: x, lambda x: x^2], ...] the coefficients of which
             are linearly fit later. If None, no models are included in the output.
+        trace_lut : int, optional
+            Number of grid points to sample along each of the x, y, and wavelength axes
+            when building a cached lookup table for the trace-shape transform. If None
+            (the default), no lookup table is used and the exact, more expensive per-pixel
+            transform is evaluated directly for every pixel.
         """
+        trace_lut_obj = None
+        if trace_lut is not None:
+            trace_lut_obj = build_trace_lut(
+                self.grism_wcs, order, wmin, wmax, self.naxis, trace_lut
+            )
+
         # generate lists of input parameters for the disperse function
         # for each chunk of sources
         disperse_args = self.chunk_sources(
@@ -352,6 +377,7 @@ class Observation:
             selected_ids=selected_ids,
             max_pixels=self.max_pixels_per_chunk,
             basis_models=basis_models,
+            trace_lut=trace_lut_obj,
         )
         t0 = time.time()
         if self.max_cpu > 1:

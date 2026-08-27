@@ -79,7 +79,9 @@ def _determine_native_wl_spacing(
     return lambdas
 
 
-def _disperse_onto_grism(x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas, order):
+def _disperse_onto_grism(
+    x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas, order, trace_lut=None
+):
     """
     Compute x/y positions in the grism image for the set of desired wavelengths.
 
@@ -97,6 +99,9 @@ def _disperse_onto_grism(x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas
         Wavelengths at which to compute dispersed pixel values
     order : int
         Spectral order number
+    trace_lut : `~jwst.wfss_contam.trace_lut.TraceLUT`, optional
+        If provided, used in place of ``imgxy_to_grismxy`` to approximate the
+        dispersed pixel positions via a cached, precomputed grid.
 
     Returns
     -------
@@ -107,16 +112,23 @@ def _disperse_onto_grism(x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas
     lambdas : ndarray
         Wavelengths corresponding to each dispersed pixel
     """
-    # x/y in image frame of grism image is the same for all wavelengths
-    x0_sky = np.repeat(x0_sky[np.newaxis, :], len(lambdas), axis=0)
-    y0_sky = np.repeat(y0_sky[np.newaxis, :], len(lambdas), axis=0)
+    # sky_to_imgxy (the "world" to "detector" transform) is a purely geometric,
+    # achromatic distortion: it does not depend on wavelength (as also assumed by
+    # _determine_native_wl_spacing, which evaluates it with a placeholder wavelength
+    # of 1). So evaluate it once on the unique per-pixel positions instead of on the
+    # full (n_lam, n_pixels) outer product used further down, avoiding redundant work.
+    x0_xy, y0_xy, _, _ = sky_to_imgxy(x0_sky, y0_sky, 1, order)
+    n_pixels = len(x0_xy)
 
-    x0_xy, y0_xy, _, _ = sky_to_imgxy(x0_sky, y0_sky, lambdas, order)
-    del x0_sky, y0_sky
-
-    # Convert to x/y in grism frame.
-    lambdas = np.repeat(lambdas[:, np.newaxis], x0_xy.shape[1], axis=1)
-    x0s, y0s = imgxy_to_grismxy(x0_xy, y0_xy, lambdas, order)
+    if trace_lut is not None:
+        x0s, y0s = trace_lut.evaluate_grid(x0_xy, y0_xy, lambdas)
+        lambdas = np.repeat(lambdas[:, np.newaxis], n_pixels, axis=1)
+    else:
+        n_lam = len(lambdas)
+        x0_xy = np.repeat(x0_xy[np.newaxis, :], n_lam, axis=0)
+        y0_xy = np.repeat(y0_xy[np.newaxis, :], n_lam, axis=0)
+        lambdas = np.repeat(lambdas[:, np.newaxis], n_pixels, axis=1)
+        x0s, y0s = imgxy_to_grismxy(x0_xy, y0_xy, lambdas, order)
     # x0s, y0s now have shape (n_lam, n_pixels)
     return x0s, y0s, lambdas
 
@@ -292,6 +304,7 @@ def disperse(
     naxis,
     oversample_factor=2,
     basis_models=None,
+    trace_lut=None,
 ):
     """
     Compute the dispersed image pixel values from the direct image.
@@ -337,6 +350,11 @@ def disperse(
         Flux distributions to evaluate at each wavelength. Typically these will be single
         polynomial orders, e.g. [lambda x: x, lambda x: x^2], ...] the coefficients of which
         are linearly fit later.
+    trace_lut : `~jwst.wfss_contam.trace_lut.TraceLUT`, optional
+        If provided, used in place of the exact "detector" to "grism_detector" transform
+        to approximate the dispersed pixel positions via a cached, precomputed grid.
+        This substantially speeds up dispersion at the cost of a small amount of accuracy.
+        If None (the default), the exact transform is evaluated for every pixel.
 
     Returns
     -------
@@ -411,6 +429,7 @@ def disperse(
         imgxy_to_grismxy,
         lambdas,
         order,
+        trace_lut=trace_lut,
     )
     del x0_sky, y0_sky
 

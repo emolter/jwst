@@ -123,6 +123,31 @@ def test_disperse_order(observation, segmentation_map, chunk_size):
     assert np.isclose(cutout.data[5, 60], 0.09994397, rtol=0.005)
 
 
+def test_disperse_order_with_trace_lut(observation, segmentation_map):
+    """Using trace_lut should give results close to the exact per-pixel transform."""
+    obs = copy.deepcopy(observation)
+    order = 1
+    sens_waves = np.linspace(1.708, 2.28, 100)
+    wmin, wmax = np.min(sens_waves), np.max(sens_waves)
+    sens_resp = np.ones_like(sens_waves)
+
+    seg = segmentation_map.data
+    all_ids = np.array(list(set(np.ravel(seg))))
+    source_ids = all_ids[50:60]
+
+    obs.disperse_order(
+        order, wmin, wmax, sens_waves, sens_resp, selected_ids=source_ids, trace_lut=25
+    )
+
+    assert not np.allclose(obs.simulated_image, 0.0)
+    assert len(obs.simulated_cutouts) == 8
+    cutout = obs.simulated_cutouts[1]
+    assert cutout.name == "51"
+    # allow more tolerance than the exact-transform test, since interpolation
+    # introduces a small amount of additional error
+    assert np.isclose(cutout.data[5, 60], 0.09994397, rtol=0.05)
+
+
 def test_aggregate_by_source():
     """Chunks for same source covering different spatial regions are combined correctly."""
     # chunk A: x=[0,1], y=[0,1] is put into results
