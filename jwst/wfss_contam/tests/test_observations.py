@@ -123,8 +123,8 @@ def test_disperse_order(observation, segmentation_map, chunk_size):
     assert np.isclose(cutout.data[5, 60], 0.09994397, rtol=0.005)
 
 
-def test_disperse_order_with_trace_lut(observation, segmentation_map):
-    """Using trace_lut should give results close to the exact per-pixel transform."""
+def test_disperse_order_with_trace_pdt(observation, segmentation_map):
+    """Using trace_pdt should give results close to the exact per-pixel transform."""
     obs = copy.deepcopy(observation)
     order = 1
     sens_waves = np.linspace(1.708, 2.28, 100)
@@ -136,7 +136,7 @@ def test_disperse_order_with_trace_lut(observation, segmentation_map):
     source_ids = all_ids[50:60]
 
     obs.disperse_order(
-        order, wmin, wmax, sens_waves, sens_resp, selected_ids=source_ids, trace_lut=25
+        order, wmin, wmax, sens_waves, sens_resp, selected_ids=source_ids, pdt_spacing=100
     )
 
     assert not np.allclose(obs.simulated_image, 0.0)

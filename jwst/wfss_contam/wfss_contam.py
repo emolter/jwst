@@ -604,7 +604,7 @@ def contam_corr(
     n_iterations=1,
     l2_alpha=0.1,
     rejection_threshold=0.1,
-    trace_lut=None,
+    pdt_spacing=None,
 ):
     """
     Correct contamination in WFSS spectral cutouts.
@@ -655,8 +655,8 @@ def contam_corr(
     rejection_threshold : float, optional
         Threshold for rejecting fits based on the fitted constant term coefficient, passed to
         `~jwst.wfss_contam.wavefit.fit_cutout_by_basis_images`.
-    trace_lut : int, optional
-        Number of grid points to sample along each of the x, y, and wavelength axes when
+    pdt_spacing : int, optional
+        Pixel spacing along each of the x, y, and wavelength axes when
         building a cached lookup table that approximates the trace-shape ("detector" to
         "grism_detector") transform. Using a lookup table substantially speeds up dispersion,
         at the cost of a small amount of accuracy, since the transform is only evaluated
@@ -819,7 +819,7 @@ def contam_corr(
             sens_response,
             selected_ids,
             basis_models=basis_models,
-            trace_lut=trace_lut,
+            pdt_spacing=pdt_spacing,
         )
 
     if no_sources:

@@ -8,7 +8,7 @@ from jwst.wfss_contam.disperse import (
     _replace_nans,
     disperse,
 )
-from jwst.wfss_contam.trace_lut import build_trace_lut
+from jwst.wfss_contam.trace_pdt import build_trace_pdt
 
 _SENS_WAVES = np.linspace(1.708, 2.28, 100)
 _WMIN, _WMAX = _SENS_WAVES[0], _SENS_WAVES[-1]
@@ -51,8 +51,8 @@ def test_sky_to_imgxy_independent_of_wavelength(grism_wcs, direct_image_with_gra
     assert lambdas_out.shape == (len(lambdas), len(x0))
 
 
-def test_disperse_with_trace_lut_matches_exact(grism_wcs, direct_image_with_gradient):
-    """Dispersing with a trace_lut should closely match the exact per-pixel transform."""
+def test_disperse_with_trace_pdt_matches_exact(grism_wcs, direct_image_with_gradient):
+    """Dispersing with a trace_pdt should closely match the exact per-pixel transform."""
     x0 = np.array([200.5])
     y0 = np.array([200.5])
     order = 1
@@ -61,7 +61,7 @@ def test_disperse_with_trace_lut_matches_exact(grism_wcs, direct_image_with_grad
     source_id = np.array([50])
     direct_image_wcs = direct_image_with_gradient.meta.wcs
 
-    trace_lut = build_trace_lut(grism_wcs, order, _WMIN, _WMAX, _NAXIS, n_grid=25)
+    trace_pdt = build_trace_pdt(grism_wcs, order, _WMIN, _WMAX, _NAXIS, spacing=100)
 
     common_kwargs = {
         "fluxes": flxs,
@@ -76,13 +76,13 @@ def test_disperse_with_trace_lut_matches_exact(grism_wcs, direct_image_with_grad
         "grism_wcs": grism_wcs,
         "naxis": _NAXIS,
     }
-    exact = disperse(x0, y0, trace_lut=None, **common_kwargs)
-    approx = disperse(x0, y0, trace_lut=trace_lut, **common_kwargs)
+    exact = disperse(x0, y0, trace_pdt=None, **common_kwargs)
+    approx = disperse(x0, y0, trace_pdt=trace_pdt, **common_kwargs)
 
     img_exact = exact[_SOURCE_ID]["image"]
     img_approx = approx[_SOURCE_ID]["image"]
     assert img_exact.shape == img_approx.shape
-    # the trace_lut trades a small amount of accuracy for speed, so allow some tolerance
+    # the trace_pdt trades a small amount of accuracy for speed, so allow some tolerance
     assert_allclose(img_approx.sum(), img_exact.sum(), rtol=0.05)
 
 

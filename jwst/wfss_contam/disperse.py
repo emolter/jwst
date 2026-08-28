@@ -80,7 +80,7 @@ def _determine_native_wl_spacing(
 
 
 def _disperse_onto_grism(
-    x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas, order, trace_lut=None
+    x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas, order, trace_pdt=None
 ):
     """
     Compute x/y positions in the grism image for the set of desired wavelengths.
@@ -99,7 +99,7 @@ def _disperse_onto_grism(
         Wavelengths at which to compute dispersed pixel values
     order : int
         Spectral order number
-    trace_lut : `~jwst.wfss_contam.trace_lut.TraceLUT`, optional
+    trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
         If provided, used in place of ``imgxy_to_grismxy`` to approximate the
         dispersed pixel positions via a cached, precomputed grid.
 
@@ -116,8 +116,8 @@ def _disperse_onto_grism(
     x0_xy, y0_xy, _, _ = sky_to_imgxy(x0_sky, y0_sky, 1, order)
     n_pixels = len(x0_xy)
 
-    if trace_lut is not None:
-        x0s, y0s = trace_lut.evaluate_grid(x0_xy, y0_xy, lambdas)
+    if trace_pdt is not None:
+        x0s, y0s = trace_pdt.evaluate_grid(x0_xy, y0_xy, lambdas)
         lambdas = np.repeat(lambdas[:, np.newaxis], n_pixels, axis=1)
     else:
         n_lam = len(lambdas)
@@ -300,7 +300,7 @@ def disperse(
     naxis,
     oversample_factor=2,
     basis_models=None,
-    trace_lut=None,
+    trace_pdt=None,
 ):
     """
     Compute the dispersed image pixel values from the direct image.
@@ -346,7 +346,7 @@ def disperse(
         Flux distributions to evaluate at each wavelength. Typically these will be single
         polynomial orders, e.g. [lambda x: x, lambda x: x^2], ...] the coefficients of which
         are linearly fit later.
-    trace_lut : `~jwst.wfss_contam.trace_lut.TraceLUT`, optional
+    trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
         If provided, used in place of the exact "detector" to "grism_detector" transform
         to approximate the dispersed pixel positions via a cached, precomputed grid.
         This substantially speeds up dispersion at the cost of a small amount of accuracy.
@@ -425,7 +425,7 @@ def disperse(
         imgxy_to_grismxy,
         lambdas,
         order,
-        trace_lut=trace_lut,
+        trace_pdt=trace_pdt,
     )
     del x0_sky, y0_sky
 

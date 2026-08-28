@@ -4,10 +4,10 @@ import numpy as np
 from astropy.modeling.mappings import Mapping
 from scipy.interpolate import RegularGridInterpolator
 
-__all__ = ["TraceLUT", "build_trace_lut"]
+__all__ = ["TracePDT", "build_trace_pdt"]
 
 
-class TraceLUT:
+class TracePDT:
     """
     Interpolated replacement for the "detector" to "grism_detector" WCS transform.
 
@@ -227,9 +227,9 @@ def _native_wavelength_grid(imgxy_to_grismxy, order, wmin, wmax, x_ref, y_ref, o
     return np.linspace(wmin, wmax, npts)
 
 
-def build_trace_lut(grism_wcs, order, wmin, wmax, naxis, n_grid, wave_oversample_factor=1):
+def build_trace_pdt(grism_wcs, order, wmin, wmax, naxis, spacing, wave_oversample_factor=1):
     """
-    Build a `TraceLUT` for one spectral order by sampling the exact transform on a coarse grid.
+    Build a `TracePDT` for one spectral order by sampling the exact transform on a coarse grid.
 
     Parameters
     ----------
@@ -243,8 +243,8 @@ def build_trace_lut(grism_wcs, order, wmin, wmax, naxis, n_grid, wave_oversample
     naxis : tuple of int
         ``(nx, ny)`` dimensions of the direct image / segmentation map, used to set
         the spatial extent of the grid.
-    n_grid : int
-        Number of grid points to sample along each of the x and y axes. Must be >= 2.
+    spacing : int
+        Spacing of grid points to sample along each of the x and y axes.
         The wavelength axis is sampled independently (see ``wave_oversample_factor``),
         since the trace-shape mapping does not vary on the same scale in wavelength
         as it does spatially.
@@ -255,13 +255,10 @@ def build_trace_lut(grism_wcs, order, wmin, wmax, naxis, n_grid, wave_oversample
 
     Returns
     -------
-    TraceLUT
-        Lookup table object that can be called as ``trace_lut(x0, y0, wavelength)``
+    TracePDT
+        Lookup table object that can be called as ``trace_pdt(x0, y0, wavelength)``
         to approximate the exact "detector" to "grism_detector" transform.
     """
-    if n_grid < 2:
-        raise ValueError(f"n_grid must be >= 2 to build a trace LUT, got {n_grid}")
-
     imgxy_to_grismxy = grism_wcs.get_transform("detector", "grism_detector")
     # We only need the x,y outputs, same as in disperse(). Making the number of
     # outputs dynamic handles legacy WCS objects that did not pass x0, y0, and
@@ -270,8 +267,10 @@ def build_trace_lut(grism_wcs, order, wmin, wmax, naxis, n_grid, wave_oversample
     imgxy_to_grismxy = imgxy_to_grismxy | Mapping((0, 1), n_inputs=n_outputs)
 
     nx, ny = naxis
-    x0_grid = np.linspace(0, nx - 1, n_grid)
-    y0_grid = np.linspace(0, ny - 1, n_grid)
+    n_grid_x = int(np.ceil(nx / spacing))
+    n_grid_y = int(np.ceil(ny / spacing))
+    x0_grid = np.linspace(0, nx - 1, n_grid_x)
+    y0_grid = np.linspace(0, ny - 1, n_grid_y)
     lam_grid = _native_wavelength_grid(
         imgxy_to_grismxy,
         order,
@@ -299,9 +298,9 @@ def build_trace_lut(grism_wcs, order, wmin, wmax, naxis, n_grid, wave_oversample
 
     xd, yd = imgxy_to_grismxy(x0_rep, y0_rep, lam_rep, order)
 
-    dx_grid = (xd - x0_rep).reshape(n_wave, n_grid, n_grid)
-    dy_grid = (yd - y0_rep).reshape(n_wave, n_grid, n_grid)
+    dx_grid = (xd - x0_rep).reshape(n_wave, n_grid_x, n_grid_y)
+    dy_grid = (yd - y0_rep).reshape(n_wave, n_grid_x, n_grid_y)
     dx_grid = np.moveaxis(dx_grid, 0, -1)
     dy_grid = np.moveaxis(dy_grid, 0, -1)
 
-    return TraceLUT(x0_grid, y0_grid, lam_grid, dx_grid, dy_grid)
+    return TracePDT(x0_grid, y0_grid, lam_grid, dx_grid, dy_grid)
