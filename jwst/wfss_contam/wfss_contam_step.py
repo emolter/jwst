@@ -30,6 +30,7 @@ class WfssContamStep(Step):
         l2_alpha = float(default=0.1)  # L2 regularization strength for polynomial spectral fit
         rejection_threshold = float(default=0.1)  # Threshold for rejecting polynomial fits based on fitted constant term coefficient
         pdt_spacing = integer(default=None)  # Spacing of grid points per spatial axis for the trace lookup table; None disables it
+        pdt_wl_oversample = float(default=None)  # Oversampling factor for the trace lookup table's wavelength grid, relative to native spacing; None matches the dispersal wavelength grid exactly
     """  # noqa: E501
 
     reference_file_types = ["photom", "wavelengthrange"]
@@ -90,6 +91,7 @@ class WfssContamStep(Step):
                 l2_alpha=self.l2_alpha,
                 rejection_threshold=self.rejection_threshold,
                 pdt_spacing=self.pdt_spacing,
+                pdt_wl_oversample=self.pdt_wl_oversample,
             )
         if simul is None:
             # Input model is returned as result, no intermediate models created

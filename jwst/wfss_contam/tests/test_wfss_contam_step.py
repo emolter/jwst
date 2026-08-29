@@ -159,7 +159,7 @@ def test_wfss_contam_step_with_polyfit(tmp_cwd, multicutoutmodel):
 
 
 def test_wfss_contam_step_with_trace_pdt(tmp_cwd, multicutoutmodel):
-    """Smoke test that the step completes when trace_pdt is set."""
+    """Smoke test that the step completes when pdt is requested."""
     result = WfssContamStep.call(multicutoutmodel, magnitude_limit=25, orders=[1], pdt_spacing=100)
     assert isinstance(result, dm.MultiSlitModel)
     assert result.meta.cal_step.wfss_contam == "COMPLETE"

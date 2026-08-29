@@ -1,6 +1,7 @@
 """Tests for jwst.wfss_contam.trace_pdt."""
 
 import numpy as np
+import pytest
 from astropy.modeling.mappings import Mapping
 from numpy.testing import assert_allclose
 
@@ -89,3 +90,37 @@ def test_wavelength_grid_independent_of_spatial_n_grid(grism_wcs):
         trace_pdt = build_trace_pdt(grism_wcs, _ORDER, _WMIN, _WMAX, _NAXIS, spacing=100)
         assert trace_pdt._lam_grid.size == lam_grid.size
         assert trace_pdt._x0_grid.size == int(np.ceil(_NAXIS[0] / 100))
+
+
+def test_exact_wavelength_grid_matches_coarse_grid(grism_wcs):
+    """Passing lam_grid should skip wavelength interpolation but agree with the coarse grid."""
+    lam_grid = np.linspace(_WMIN, _WMAX, 50)
+    trace_pdt_exact = build_trace_pdt(
+        grism_wcs, _ORDER, _WMIN, _WMAX, _NAXIS, spacing=100, lam_grid=lam_grid
+    )
+    trace_pdt_coarse = build_trace_pdt(grism_wcs, _ORDER, _WMIN, _WMAX, _NAXIS, spacing=100)
+    assert trace_pdt_exact._exact_wavelength_grid is True
+    assert trace_pdt_coarse._exact_wavelength_grid is False
+
+    x0 = np.array([500.0, 800.0])
+    y0 = np.array([600.0, 900.0])
+
+    x_exact, y_exact = trace_pdt_exact.evaluate_grid(x0, y0, lam_grid)
+    x_coarse, y_coarse = trace_pdt_coarse.evaluate_grid(x0, y0, lam_grid)
+
+    assert_allclose(x_exact, x_coarse, atol=0.1)
+    assert_allclose(y_exact, y_coarse, atol=0.1)
+
+
+def test_evaluate_grid_exact_wavelength_grid_raises_on_mismatch(grism_wcs):
+    """evaluate_grid must not silently interpolate a wavelength array it wasn't built for."""
+    lam_grid = np.linspace(_WMIN, _WMAX, 50)
+    trace_pdt = build_trace_pdt(
+        grism_wcs, _ORDER, _WMIN, _WMAX, _NAXIS, spacing=100, lam_grid=lam_grid
+    )
+
+    x0 = np.array([500.0])
+    y0 = np.array([600.0])
+    wrong_lam = np.linspace(_WMIN, _WMAX, 30)
+    with pytest.raises(ValueError, match="exact_wavelength_grid"):
+        trace_pdt.evaluate_grid(x0, y0, wrong_lam)

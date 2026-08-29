@@ -15,70 +15,6 @@ log = logging.getLogger(__name__)
 __all__ = ["disperse"]
 
 
-def _determine_native_wl_spacing(
-    x0_sky,
-    y0_sky,
-    sky_to_imgxy,
-    imgxy_to_grismxy,
-    order,
-    wmin,
-    wmax,
-    oversample_factor=2,
-):
-    """
-    Determine the wavelength spacing necessary to adequately sample the dispersed frame.
-
-    Parameters
-    ----------
-    x0_sky : float or ndarray
-        RA of the input pixel position in direct image and segmentation map
-    y0_sky : float or ndarray
-        Dec of the input pixel position in direct image and segmentation map
-    sky_to_imgxy : astropy model
-        Transform from sky to image coordinates
-    imgxy_to_grismxy : astropy model
-        Transform from image to grism coordinates
-    order : int
-        Spectral order number
-    wmin : float
-        Minimum wavelength for dispersed spectra
-    wmax : float
-        Maximum wavelength for dispersed spectra
-    oversample_factor : int, optional
-        Factor by which to oversample the wavelength grid
-
-    Returns
-    -------
-    lambdas : ndarray
-        Wavelengths at which to compute dispersed pixel values
-
-    Notes
-    -----
-    It was found that the native wavelength spacing varies by a few percent or less
-    across the detector for both NIRCam and NIRISS. This function has the capability to
-    take in many x0, y0 at once and take the median to get the wavelengths,
-    but typically it's okay to just put in any x0, y0 pair.
-    """
-    # Get x/y positions in the grism image corresponding to wmin and wmax:
-    # Convert to x/y in the direct image frame
-    x0_xy, y0_xy, _, _ = sky_to_imgxy(x0_sky, y0_sky, 1, order)
-    # then convert to x/y in the grism image frame.
-    xwmin, ywmin = imgxy_to_grismxy(x0_xy, y0_xy, wmin, order)
-    xwmax, ywmax = imgxy_to_grismxy(x0_xy, y0_xy, wmax, order)
-    dxw = xwmax - xwmin
-    dyw = ywmax - ywmin
-
-    # Create list of wavelengths on which to compute dispersed pixels
-    dw = np.abs((wmax - wmin) / (dyw - dxw))
-    dlam = np.median(dw / oversample_factor)
-    # need at least three points because often the sensitivity curve
-    # is not well-defined at the edges. This is typically hit only for Order 0,
-    # since dlam can be large or poorly defined in that case.
-    npts = max(int(np.ceil((wmax - wmin) / dlam)), 3)
-    lambdas = np.linspace(wmin, wmax, npts)
-    return lambdas
-
-
 def _disperse_onto_grism(
     x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas, order, trace_pdt=None
 ):
@@ -291,14 +227,12 @@ def disperse(
     band_wavelengths,
     source_ids_per_pixel,
     order,
-    wmin,
-    wmax,
+    lambdas,
     sens_waves,
     sens_resp,
     direct_image_wcs,
     grism_wcs,
     naxis,
-    oversample_factor=2,
     basis_models=None,
     trace_pdt=None,
 ):
@@ -325,10 +259,11 @@ def disperse(
         Source IDs of the input pixels in the segmentation map
     order : int
         Spectral order number
-    wmin : float
-        Minimum wavelength for dispersed spectra
-    wmax : float
-        Maximum wavelength for dispersed spectra
+    lambdas : ndarray
+        Wavelengths at which to compute dispersed pixel values, precomputed once per
+        spectral order (see `~jwst.wfss_contam.observations.Observation.disperse_order`
+        and `~jwst.wfss_contam.trace_pdt._native_wavelength_grid`), since the native
+        wavelength spacing varies negligibly across the detector.
     sens_waves : float array
         Wavelength array from photom reference file. Expected unit is micron.
     sens_resp : float array
@@ -340,8 +275,6 @@ def disperse(
         WCS object for the grism image
     naxis : tuple
         Dimensions of the grism image (naxis[0], naxis[1])
-    oversample_factor : int, optional
-        Factor by which to oversample the wavelength grid
     basis_models : list[Callable], optional
         Flux distributions to evaluate at each wavelength. Typically these will be single
         polynomial orders, e.g. [lambda x: x, lambda x: x^2], ...] the coefficients of which
@@ -383,17 +316,6 @@ def disperse(
     x0_sky, y0_sky = direct_image_wcs(x0, y0, with_bounding_box=False)
     del x0, y0
 
-    # native spacing does not change much over the detector, so just put in one x0, y0
-    lambdas = _determine_native_wl_spacing(
-        x0_sky[0],
-        y0_sky[0],
-        sky_to_imgxy,
-        imgxy_to_grismxy,
-        order,
-        wmin,
-        wmax,
-        oversample_factor=oversample_factor,
-    )
     dlam = lambdas[1] - lambdas[0]
     nlam = len(lambdas)
 

@@ -605,6 +605,7 @@ def contam_corr(
     l2_alpha=0.1,
     rejection_threshold=0.1,
     pdt_spacing=None,
+    pdt_wl_oversample=1,
 ):
     """
     Correct contamination in WFSS spectral cutouts.
@@ -663,6 +664,12 @@ def contam_corr(
         exactly on a coarse grid and interpolated elsewhere. If None (the default), no
         lookup table is used and the exact, more expensive transform is evaluated for
         every pixel.
+    pdt_wl_oversample : float, optional
+        Oversampling factor for the lookup table's wavelength grid, relative to the
+        native dispersion scale. If None, the lookup table's wavelength grid instead
+        exactly matches the dispersal wavelength grid, allowing wavelength-axis
+        interpolation to be skipped entirely when evaluating the lookup table. Only
+        used if ``pdt_spacing`` is not None.
 
     Returns
     -------
@@ -820,6 +827,7 @@ def contam_corr(
             selected_ids,
             basis_models=basis_models,
             pdt_spacing=pdt_spacing,
+            pdt_wl_oversample=pdt_wl_oversample,
         )
 
     if no_sources:
