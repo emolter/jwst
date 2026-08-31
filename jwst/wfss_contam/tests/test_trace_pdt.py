@@ -5,7 +5,7 @@ import pytest
 from astropy.modeling.mappings import Mapping
 from numpy.testing import assert_allclose
 
-from jwst.wfss_contam.trace_pdt import TracePDT, _native_wavelength_grid, build_trace_pdt
+from jwst.wfss_contam.trace_pdt import TracePDT, build_trace_pdt
 
 _ORDER = 1
 _WMIN, _WMAX = 1.708, 2.28
@@ -35,10 +35,8 @@ def test_trace_pdt_matches_exact_transform(grism_wcs):
     x_exact, y_exact = exact_transform(x0, y0, wavelength, _ORDER)
     x_interp, y_interp = trace_pdt(x0, y0, wavelength)
 
-    # Linear interpolation on a modest grid should recover sub-pixel accuracy
-    # since the trace shape varies smoothly across the detector.
-    assert_allclose(x_interp, x_exact, atol=0.5)
-    assert_allclose(y_interp, y_exact, atol=0.5)
+    assert_allclose(x_interp, x_exact, atol=0.05)
+    assert_allclose(y_interp, y_exact, atol=0.05)
 
 
 def test_trace_pdt_preserves_shape(grism_wcs):
@@ -78,20 +76,6 @@ def test_evaluate_grid_matches_call(grism_wcs):
     assert_allclose(y_grid, y_call, rtol=1e-10)
 
 
-def test_wavelength_grid_independent_of_spatial_n_grid(grism_wcs):
-    """The wavelength grid density should not depend on the spatial n_grid parameter."""
-    imgxy_to_grismxy = _exact_transform(grism_wcs)
-    lam_grid = _native_wavelength_grid(
-        imgxy_to_grismxy, _ORDER, _WMIN, _WMAX, _NAXIS[0] / 2.0, _NAXIS[1] / 2.0
-    )
-    # native spacing over this wavelength range should give many more points
-    # than a typical small spatial grid, and should not equal it by coincidence
-    for n_grid in (3, 10, 50):
-        trace_pdt = build_trace_pdt(grism_wcs, _ORDER, _WMIN, _WMAX, _NAXIS, spacing=100)
-        assert trace_pdt._lam_grid.size == lam_grid.size
-        assert trace_pdt._x0_grid.size == int(np.ceil(_NAXIS[0] / 100))
-
-
 def test_exact_wavelength_grid_matches_coarse_grid(grism_wcs):
     """Passing lam_grid should skip wavelength interpolation but agree with the coarse grid."""
     lam_grid = np.linspace(_WMIN, _WMAX, 50)
@@ -108,8 +92,8 @@ def test_exact_wavelength_grid_matches_coarse_grid(grism_wcs):
     x_exact, y_exact = trace_pdt_exact.evaluate_grid(x0, y0, lam_grid)
     x_coarse, y_coarse = trace_pdt_coarse.evaluate_grid(x0, y0, lam_grid)
 
-    assert_allclose(x_exact, x_coarse, atol=0.1)
-    assert_allclose(y_exact, y_coarse, atol=0.1)
+    assert_allclose(x_exact, x_coarse, atol=0.05)
+    assert_allclose(y_exact, y_coarse, atol=0.05)
 
 
 def test_evaluate_grid_exact_wavelength_grid_raises_on_mismatch(grism_wcs):

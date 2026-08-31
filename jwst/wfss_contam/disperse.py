@@ -260,10 +260,7 @@ def disperse(
     order : int
         Spectral order number
     lambdas : ndarray
-        Wavelengths at which to compute dispersed pixel values, precomputed once per
-        spectral order (see `~jwst.wfss_contam.observations.Observation.disperse_order`
-        and `~jwst.wfss_contam.trace_pdt._native_wavelength_grid`), since the native
-        wavelength spacing varies negligibly across the detector.
+        Wavelengths at which to compute dispersed pixel values.
     sens_waves : float array
         Wavelength array from photom reference file. Expected unit is micron.
     sens_resp : float array

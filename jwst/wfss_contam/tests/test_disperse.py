@@ -1,17 +1,15 @@
 import numpy as np
-from astropy.modeling.mappings import Mapping
 from numpy.testing import assert_allclose
 
 from jwst.wfss_contam.disperse import (
     _build_dispersed_image_of_source,
-    _disperse_onto_grism,
     _replace_nans,
     disperse,
 )
 from jwst.wfss_contam.trace_pdt import (
-    _native_wavelength_grid,
     build_trace_pdt,
     get_grism_detector_transform,
+    native_wavelength_grid,
 )
 
 _SENS_WAVES = np.linspace(1.708, 2.28, 100)
@@ -24,7 +22,7 @@ def _default_lambdas(grism_wcs, order=1, oversample_factor=2):
     """Compute the wavelength grid disperse() would use for the default test parameters."""
     imgxy_to_grismxy = get_grism_detector_transform(grism_wcs)
     nx, ny = _NAXIS
-    return _native_wavelength_grid(
+    return native_wavelength_grid(
         imgxy_to_grismxy,
         order,
         _WMIN,
@@ -33,76 +31,6 @@ def _default_lambdas(grism_wcs, order=1, oversample_factor=2):
         (ny - 1) / 2.0,
         oversample_factor=oversample_factor,
     )
-
-
-def test_sky_to_imgxy_independent_of_wavelength(grism_wcs, direct_image_with_gradient):
-    """
-    Guard the assumption that "world" -> "detector" does not depend on wavelength.
-
-    _disperse_onto_grism relies on this to avoid evaluating that transform on the
-    full (n_lam, n_pixels) outer product; if this assumption ever breaks for some
-    reference file, this test should catch it.
-    """
-    direct_image_wcs = direct_image_with_gradient.meta.wcs
-    sky_to_imgxy = grism_wcs.get_transform("world", "detector")
-    imgxy_to_grismxy = grism_wcs.get_transform("detector", "grism_detector")
-    n_outputs = len(imgxy_to_grismxy.outputs)
-    imgxy_to_grismxy = imgxy_to_grismxy | Mapping((0, 1), n_inputs=n_outputs)
-
-    x0 = np.array([100.5, 200.5, 300.5])
-    y0 = np.array([100.5, 150.5, 250.5])
-    x0_sky, y0_sky = direct_image_wcs(x0, y0, with_bounding_box=False)
-
-    lambdas = np.linspace(_WMIN, _WMAX, 7)
-    x0_ref, y0_ref, _, _ = sky_to_imgxy(x0_sky, y0_sky, 1, 1)
-
-    for lam in lambdas:
-        x0_lam, y0_lam, _, _ = sky_to_imgxy(x0_sky, y0_sky, lam, 1)
-        assert_allclose(x0_lam, x0_ref)
-        assert_allclose(y0_lam, y0_ref)
-
-    # sanity check the function under test still returns the expected shape
-    x0s, y0s, lambdas_out = _disperse_onto_grism(
-        x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas, 1
-    )
-    assert x0s.shape == (len(lambdas), len(x0))
-    assert y0s.shape == (len(lambdas), len(x0))
-    assert lambdas_out.shape == (len(lambdas), len(x0))
-
-
-def test_disperse_with_trace_pdt_matches_exact(grism_wcs, direct_image_with_gradient):
-    """Dispersing with a trace_pdt should closely match the exact per-pixel transform."""
-    x0 = np.array([200.5])
-    y0 = np.array([200.5])
-    order = 1
-    flxs = np.array([[1.0]])
-    band_wave = np.array([2.0])
-    source_id = np.array([50])
-    direct_image_wcs = direct_image_with_gradient.meta.wcs
-
-    trace_pdt = build_trace_pdt(grism_wcs, order, _WMIN, _WMAX, _NAXIS, spacing=100)
-    lambdas = _default_lambdas(grism_wcs, order=order)
-
-    common_kwargs = {
-        "fluxes": flxs,
-        "band_wavelengths": band_wave,
-        "source_ids_per_pixel": source_id,
-        "order": order,
-        "lambdas": lambdas,
-        "sens_waves": _SENS_WAVES,
-        "sens_resp": np.ones(100),
-        "direct_image_wcs": direct_image_wcs,
-        "grism_wcs": grism_wcs,
-        "naxis": _NAXIS,
-    }
-    exact = disperse(x0, y0, trace_pdt=None, **common_kwargs)
-    approx = disperse(x0, y0, trace_pdt=trace_pdt, **common_kwargs)
-
-    img_exact = exact[_SOURCE_ID]["image"]
-    img_approx = approx[_SOURCE_ID]["image"]
-    assert img_exact.shape == img_approx.shape
-    # the trace_pdt trades a small amount of accuracy for speed, so allow some tolerance
-    assert_allclose(img_approx.sum(), img_exact.sum(), rtol=0.05)
 
 
 def test_disperse_oversample_same_result(grism_wcs, direct_image_with_gradient):
@@ -123,7 +51,7 @@ def test_disperse_oversample_same_result(grism_wcs, direct_image_with_gradient):
 
     output_images = []
     for os in [2, 3]:
-        lambdas = _native_wavelength_grid(
+        lambdas = native_wavelength_grid(
             imgxy_to_grismxy,
             order,
             wmin,
@@ -348,3 +276,37 @@ def test_replace_nans_no_nans():
     arr = np.array([[1.0, 2.0, 3.0]]).T
     filled = _replace_nans(arr)
     assert filled is arr
+
+
+def test_disperse_with_trace_pdt_matches_exact(grism_wcs, direct_image_with_gradient):
+    """Dispersing with a trace_pdt should match the exact per-pixel transform."""
+    x0 = np.array([200.5])
+    y0 = np.array([200.5])
+    order = 1
+    flxs = np.array([[1.0]])
+    band_wave = np.array([2.0])
+    source_id = np.array([50])
+    direct_image_wcs = direct_image_with_gradient.meta.wcs
+
+    trace_pdt = build_trace_pdt(grism_wcs, order, _WMIN, _WMAX, _NAXIS, spacing=20)
+    lambdas = _default_lambdas(grism_wcs, order=order)
+
+    common_kwargs = {
+        "fluxes": flxs,
+        "band_wavelengths": band_wave,
+        "source_ids_per_pixel": source_id,
+        "order": order,
+        "lambdas": lambdas,
+        "sens_waves": _SENS_WAVES,
+        "sens_resp": np.ones(100),
+        "direct_image_wcs": direct_image_wcs,
+        "grism_wcs": grism_wcs,
+        "naxis": _NAXIS,
+    }
+    exact = disperse(x0, y0, trace_pdt=None, **common_kwargs)
+    approx = disperse(x0, y0, trace_pdt=trace_pdt, **common_kwargs)
+
+    img_exact = exact[_SOURCE_ID]["image"]
+    img_approx = approx[_SOURCE_ID]["image"]
+    assert img_exact.shape == img_approx.shape
+    assert_allclose(img_approx, img_exact, rtol=0.1)

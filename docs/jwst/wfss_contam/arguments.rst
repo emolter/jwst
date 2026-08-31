@@ -44,14 +44,19 @@ The ``wfss_contam`` step uses the following optional arguments.
   Decreasing this value will typically reduce the memory usage of the step. The effect on runtime
   depends on the machine hardware and whether multi-processing is enabled. Defaults to 5,000.
 
-``--trace_lut``
+``--pdt_spacing``
   An integer specifying the number of grid points to sample along each of the x, y, and
   wavelength axes when building a cached lookup table that approximates the trace-shape
   transform used to disperse each pixel. Since the trace shape varies smoothly across the
   detector, interpolating from a coarse precomputed grid instead of evaluating the exact
-  (and much more expensive) transform for every pixel can substantially speed up the step,
-  at the cost of a small amount of accuracy. If ``None`` (the default), no lookup table is
+  transform for every pixel can substantially speed up the step, at the cost of a small
+  amount of accuracy. If ``None`` (the default), no lookup table is
   used and the exact transform is evaluated for every pixel.
+
+``--pdt_wl_oversample``
+  A float indicating the oversampling factor for the trace lookup table's wavelength grid.
+  If ``None`` (the default), the wavelength grid of the lookup table matches the grid specified
+  by ``--wl_oversample``.
 
 Polynomial fitting parameters
 -----------------------------

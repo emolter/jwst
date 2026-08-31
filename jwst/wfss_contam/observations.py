@@ -11,9 +11,9 @@ from stdatamodels.jwst import datamodels
 
 from jwst.wfss_contam.disperse import disperse
 from jwst.wfss_contam.trace_pdt import (
-    _native_wavelength_grid,
     build_trace_pdt,
     get_grism_detector_transform,
+    native_wavelength_grid,
 )
 
 log = logging.getLogger(__name__)
@@ -235,7 +235,7 @@ class Observation:
             Spectral order to process
         lambdas : ndarray
             Wavelengths at which to compute dispersed pixel values for this order,
-            precomputed once per order (see `disperse_order`) rather than once per chunk.
+            precomputed once per order.
         sens_waves : ndarray
             Wavelength array from photom reference file
         sens_response : ndarray
@@ -250,8 +250,8 @@ class Observation:
             [P1(x), P2(x), ...], the coefficients of which are linearly fit later.
             If None, no models are included in the output.
         trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
-            Precomputed lookup table for this spectral order, passed through to
-            ``disperse()`` for every chunk. If None, no lookup table is used.
+            Precomputed pixel dispersion table for this spectral order.
+            If None, no lookup table is used.
 
         Returns
         -------
@@ -358,8 +358,8 @@ class Observation:
         pdt_spacing : int, optional
             Spacing of grid points to sample along the x and y axes
             when building a cached lookup table for the trace-shape transform. If None
-            (the default), no lookup table is used and the exact, more expensive per-pixel
-            transform is evaluated directly for every pixel.
+            (the default), no lookup table is used and the exact transform is evaluated directly
+            for every pixel.
         pdt_wl_oversample : float, optional
             Oversampling factor for the lookup table's wavelength grid, relative to the
             native dispersion scale. If None, the lookup table's wavelength grid instead
@@ -367,13 +367,12 @@ class Observation:
             `~jwst.wfss_contam.trace_pdt.TracePDT.evaluate_grid` to skip wavelength-axis
             interpolation entirely. Only used if ``pdt_spacing`` is not None.
         """
-        # Determine the dispersal wavelength grid once per order rather than once per
-        # chunk: native spacing varies negligibly across the detector, so a single
-        # representative pixel (the center of the direct image, matching the convention
-        # used by build_trace_pdt) is adequate for every chunk in this order.
+        # Determine the wavelength grid once per order.
+        # native spacing does not vary significantly across the detector, so a single
+        # representative pixel is good enough.
         imgxy_to_grismxy = get_grism_detector_transform(self.grism_wcs)
         nx, ny = self.naxis
-        lambdas = _native_wavelength_grid(
+        lambdas = native_wavelength_grid(
             imgxy_to_grismxy,
             order,
             wmin,
