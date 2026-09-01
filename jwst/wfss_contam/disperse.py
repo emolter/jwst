@@ -142,6 +142,20 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
     outputs_by_source : dict
         Dictionary containing dispersed images and bounds for each source ID
     """
+    # Chunks are pre-sorted by source ID before dispersing (see Observation.chunk_sources),
+    # so most chunks end up containing pixels from a single source only.
+    # In this case, skip the sort/group-by machinery below entirely.
+    first_sid = source_ids_per_pixel[0]
+    if (source_ids_per_pixel == first_sid).all():
+        bounds = [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())]
+        img = _build_dispersed_image_of_source(xs, ys, counts, bounds)
+        outputs_by_source = {first_sid: {"bounds": bounds, "image": img}}
+        if model_counts is not None and len(model_counts) > 0:
+            outputs_by_source[first_sid]["model_counts"] = [
+                _build_dispersed_image_of_source(xs, ys, mc, bounds) for mc in model_counts
+            ]
+        return outputs_by_source
+
     # First sort by source ID. xs, ys input here cannot be assumed sorted after get_clipped_pixels
     sort_idx = np.argsort(source_ids_per_pixel)
     sorted_ids = source_ids_per_pixel[sort_idx]
