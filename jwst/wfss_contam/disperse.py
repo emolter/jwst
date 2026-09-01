@@ -157,7 +157,7 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
         return outputs_by_source
 
     # First sort by source ID. xs, ys input here cannot be assumed sorted after get_clipped_pixels
-    sort_idx = np.argsort(source_ids_per_pixel)
+    sort_idx = np.argsort(source_ids_per_pixel.astype(np.int16), kind="stable")
     sorted_ids = source_ids_per_pixel[sort_idx]
     sorted_xs = xs[sort_idx]
     sorted_ys = ys[sort_idx]
@@ -199,32 +199,6 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
                 for mc in sorted_model_counts
             ]
     return outputs_by_source
-
-
-# def _build_dispersed_image_of_source(x, y, flux, bounds):
-#     """
-#     Convert a flattened list of pixels to a 2-D grism image of that source.
-
-#     Parameters
-#     ----------
-#     x : ndarray
-#         X coordinates of pixels in the grism image
-#     y : ndarray
-#         Y coordinates of pixels in the grism image
-#     flux : ndarray
-#         Fluxes of pixels in the grism image
-#     bounds : list
-#         Pre-computed [minx, maxx, miny, maxy] bounds for the source.
-
-#     Returns
-#     -------
-#     a : ndarray
-#         2-D dispersed image of the source
-#     """
-#     minx, maxx, miny, maxy = bounds
-#     img = np.zeros((maxy - miny + 1, maxx - minx + 1), dtype=flux.dtype)
-#     np.add.at(img, (y - miny, x - minx), flux)
-#     return img
 
 
 def _build_dispersed_image_of_source(x, y, flux, bounds):
