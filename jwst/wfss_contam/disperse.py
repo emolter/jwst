@@ -395,8 +395,17 @@ def disperse(
     )
     dlam = lambdas[1] - lambdas[0]
     nlam = len(lambdas)
+    # lam_grid and source_ids_1d are the true (non-redundant) 1-D information content of
+    # the (nlam, n_pixels) arrays built below: lambdas is constant along the pixel axis,
+    # source_ids_per_pixel is constant along the wavelength axis. Kept around so the
+    # post-clipping gather below can read from these small arrays instead of their much
+    # larger, mostly-redundant (nlam, n_pixels) broadcasts.
+    n_pixels = len(source_ids_per_pixel)
+    lam_grid = lambdas
+    source_ids_1d = source_ids_per_pixel
 
     # Interpolate the input fluxes onto the wavelength grid of the dispersed image
+    fluxes_1d = None
     if len(band_wavelengths) >= 2:
         # interp1d does not handle NaNs, so replace with interplation that assumes
         # flat spectrum at the edges and linear interpolation in the interior,
@@ -414,6 +423,7 @@ def disperse(
         fluxes = interp_fn(lambdas)  # (nlam, n_pixels)
     else:
         # constant flux across all wavelengths
+        fluxes_1d = fluxes[0]
         fluxes = np.repeat(fluxes[0][np.newaxis, :], nlam, axis=0)
     source_ids_per_pixel = np.repeat(source_ids_per_pixel[np.newaxis, :], nlam, axis=0)
 
@@ -440,9 +450,15 @@ def disperse(
     xs, ys, areas, index = get_clipped_pixels(x0s, y0s, padding, naxis[0], naxis[1], width, height)
     del x0s, y0s
 
-    lambdas = np.take(lambdas, index)
-    fluxes = np.take(fluxes, index)
-    source_ids_per_pixel = np.take(source_ids_per_pixel, index)
+    # get_clipped_pixels treats its (nlam, n_pixels) inputs as flattened in C order,
+    # so `index` decomposes cleanly into a (wavelength, pixel) pair. Use that to gather
+    # lambdas and source_ids_per_pixel from their small 1-D arrays instead of from the
+    # large (nlam, n_pixels) broadcasts, which is cheaper to compute.
+    lam_idx, pixel_idx = np.divmod(index, n_pixels)
+    lambdas = lam_grid[lam_idx]
+    source_ids_per_pixel = source_ids_1d[pixel_idx]
+    # This trick can only be applied to fluxes if they are flat-spectrum
+    fluxes = fluxes_1d[pixel_idx] if fluxes_1d is not None else np.take(fluxes, index)
 
     # Evaluate basis models on the 1-D lambda array.
     # even after np.take this is element-wise so this is still full resolution
