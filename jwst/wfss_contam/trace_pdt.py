@@ -12,12 +12,11 @@ class TracePDT:
     Interpolated replacement for the "detector" to "grism_detector" WCS transform.
 
     Holds a pixel dispersion table, which is basically a cache of the
-    ``(x0, y0, wavelength) -> (dx, dy)`` dispersed-pixel offsets on a
-    coarse regular grid built using the exact transform.
-    On init a linear interpolator is built between the sparse regular grid.
-    On call the interpolator provides a drop-in replacement for the exact detector-to-grism
-    WCS transform to disperse the direct-image pixels. This takes advantage of the fact
-    that the trace shape varies smoothly across the detector.
+    ``(x0, y0, wavelength) -> (dx, dy)`` mapping on a coarse regular grid
+    built using the exact transform.
+    On init a linear interpolant is built from the sparse regular grid.
+    On call the interpolant provides a drop-in replacement for the exact detector-to-grism
+    WCS transform to disperse the direct-image pixels.
     """
 
     def __init__(self, x0_grid, y0_grid, lam_grid, dx_grid, dy_grid, exact_wavelength_grid=False):
@@ -36,7 +35,7 @@ class TracePDT:
         exact_wavelength_grid : bool, optional
             If True, ``lam_grid`` is known to exactly match the wavelength array that
             will be passed to `evaluate_grid`, allowing it to skip wavelength-axis
-            interpolation entirely (see `evaluate_grid`). Defaults to False.
+            interpolation entirely. Defaults to False.
         """
         self._x0_grid = np.asarray(x0_grid)
         self._y0_grid = np.asarray(y0_grid)
@@ -70,7 +69,7 @@ class TracePDT:
             Detector x, y position(s) of the direct image pixel(s).
         wavelength : np.ndarray
             Wavelength(s) at which to evaluate the dispersion.
-            Must have the same shape as ``x0`` and ``y0``.
+            Must have the same shape as x0 and y0.
 
         Returns
         -------
@@ -84,15 +83,12 @@ class TracePDT:
 
     def evaluate_grid(self, x0, y0, wavelength):
         """
-        Efficiently evaluate the PDT on the outer-product grid used by ``disperse()``.
+        Evaluate the PDT on a grid.
 
         Every pixel is dispersed at the same set of wavelengths, so this exploits the
         separability of trilinear interpolation: the ``(x0, y0)`` grid-cell lookup is
         done once per pixel (independent of wavelength), and the wavelength grid-cell
         lookup is done once for the shared wavelength array.
-        This avoids the redundant ``O(n_pixels * n_wavelengths)`` grid-cell lookups
-        that a generic n-dimensional interpolator (e.g. `__call__`) would otherwise
-        perform for every one of the many repeated ``(x0, y0)`` / wavelength combinations.
 
         If this `TracePDT` was built with ``exact_wavelength_grid=True``,
         wavelength-axis interpolation is skipped entirely, reducing this to a 2-D
@@ -114,8 +110,6 @@ class TracePDT:
             Arrays of shape ``(n_wave, n_pixels)`` giving the interpolated dispersed
             pixel positions.
         """
-        wavelength = np.asarray(wavelength)
-
         ix, wx = self._cell_weights(self._x0_grid, x0)
         iy, wy = self._cell_weights(self._y0_grid, y0)
 
@@ -177,7 +171,7 @@ class TracePDT:
 
         Returns
         -------
-        curve : np.ndarray
+        np.ndarray
             Array of shape ``(n_pixels, len(lam_grid))``.
         """
         c00 = grid_vals[ix, iy, :]
@@ -210,7 +204,7 @@ class TracePDT:
 
         Returns
         -------
-        interp_vals : np.ndarray
+        np.ndarray
             Interpolated values at the specified pixel and wavelength coordinates.
         """
         curve = TracePDT._bilinear_only(grid_vals, ix, wx, iy, wy)  # (n_pixels, n_wave_grid)
@@ -223,11 +217,11 @@ class TracePDT:
 
 def native_wavelength_grid(imgxy_to_grismxy, order, wmin, wmax, x_ref, y_ref, oversample_factor=1):
     """
-    Determine the approximate grid that disperses wavelengths into unique pixels.
+    Make a grid with the approximate spacing that disperses each wavelength into a unique pixel.
 
     Using the direct-image-to-grism transform, disperse the min, max wavelength.
     Compute the distance in the dispersed plane between those wavelength endpoints.
-    Use those to figure out how many wavelength samples are needed to put roughly one
+    Use that distance to figure out how many wavelength samples are needed to put roughly one
     unique wavelength into each pixel.
     Finally oversample that by the oversample factor.
 
@@ -286,7 +280,7 @@ def build_trace_pdt(
     grism_wcs, order, wmin, wmax, direct_shape, spacing, wave_oversample_factor=1, lam_grid=None
 ):
     """
-    Build a `TracePDT` for one spectral order by sampling the exact transform on a coarse grid.
+    Build a TracePDT for one spectral order by sampling the exact transform on a coarse grid.
 
     Parameters
     ----------
@@ -303,15 +297,14 @@ def build_trace_pdt(
     spacing : int
         Spacing of grid points to sample along each of the x and y axes.
     wave_oversample_factor : float, optional
-        Factor by which to oversample the native wavelength spacing (see
-        `native_wavelength_grid`) when building the wavelength axis of the grid.
-        Defaults to 1, i.e. the native spacing. Unused if ``lam_grid`` is provided.
+        Factor by which to oversample the native wavelength spacing
+        when building the wavelength axis of the grid. Unused if ``lam_grid`` is provided.
     lam_grid : np.ndarray, optional
         Precomputed wavelength grid to use directly instead of computing one from
-        ``wmin``, ``wmax``, and ``wave_oversample_factor``. If this exactly matches the
-        wavelength array that will later be passed to `TracePDT.evaluate_grid` (e.g. the
-        per-order dispersal wavelength grid), interpolation along the wavelength axis can
-        be skipped entirely at query time. If None (the default), the grid is computed
+        ``wmin``, ``wmax``, and ``wave_oversample_factor``. This must exactly match the
+        wavelength array that will later be passed to `TracePDT.evaluate_grid`, as
+        setting this means interpolation along the wavelength axis will be skipped entirely
+        at query time. If None (the default), the grid is computed
         from ``wmin``, ``wmax``, and ``wave_oversample_factor``.
 
     Returns
@@ -349,7 +342,7 @@ def build_trace_pdt(
     n_wave = lam_grid.size
 
     # Match the (n_wave, n_pixels) calling convention. Some backward grism
-    # dispersion transforms rely on this specific broadcasting pattern internally
+    # dispersion transforms rely on this broadcasting pattern internally
     # to efficiently invert the wavelength solution for many pixels at once.
     x0_rep = np.repeat(x0_flat[np.newaxis, :], n_wave, axis=0)
     y0_rep = np.repeat(y0_flat[np.newaxis, :], n_wave, axis=0)

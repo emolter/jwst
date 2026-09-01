@@ -658,13 +658,13 @@ def contam_corr(
         `~jwst.wfss_contam.wavefit.fit_cutout_by_basis_images`.
     pdt_spacing : int, optional
         Pixel spacing along each of the x, y, and wavelength axes when
-        building a cached pixel dispersion table that approximates the trace-shape ("detector" to
-        "grism_detector") transform.
+        building the PDT. If None, the exact grism-to-detector transform
+        will be evaluated at every pixel.
     pdt_wl_oversample : float, optional
-        Oversampling factor for the lookup table's wavelength grid, relative to the
-        native dispersion scale. If None, the lookup table's wavelength grid instead
+        Oversampling factor for the pixel dispersion table wavelength grid, relative to the
+        native dispersion scale. If None, the lookup table's wavelength grid
         exactly matches the dispersal wavelength grid, allowing wavelength-axis
-        interpolation to be skipped entirely when evaluating the lookup table. Only
+        interpolation to be skipped entirely when evaluating the PDT. Only
         used if ``pdt_spacing`` is not None.
 
     Returns
