@@ -196,30 +196,41 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
     return outputs_by_source
 
 
+# def _build_dispersed_image_of_source(x, y, flux, bounds):
+#     """
+#     Convert a flattened list of pixels to a 2-D grism image of that source.
+
+#     Parameters
+#     ----------
+#     x : ndarray
+#         X coordinates of pixels in the grism image
+#     y : ndarray
+#         Y coordinates of pixels in the grism image
+#     flux : ndarray
+#         Fluxes of pixels in the grism image
+#     bounds : list
+#         Pre-computed [minx, maxx, miny, maxy] bounds for the source.
+
+#     Returns
+#     -------
+#     a : ndarray
+#         2-D dispersed image of the source
+#     """
+#     minx, maxx, miny, maxy = bounds
+#     img = np.zeros((maxy - miny + 1, maxx - minx + 1), dtype=flux.dtype)
+#     np.add.at(img, (y - miny, x - minx), flux)
+#     return img
+
+
 def _build_dispersed_image_of_source(x, y, flux, bounds):
-    """
-    Convert a flattened list of pixels to a 2-D grism image of that source.
-
-    Parameters
-    ----------
-    x : ndarray
-        X coordinates of pixels in the grism image
-    y : ndarray
-        Y coordinates of pixels in the grism image
-    flux : ndarray
-        Fluxes of pixels in the grism image
-    bounds : list
-        Pre-computed [minx, maxx, miny, maxy] bounds for the source.
-
-    Returns
-    -------
-    a : ndarray
-        2-D dispersed image of the source
-    """
     minx, maxx, miny, maxy = bounds
-    img = np.zeros((maxy - miny + 1, maxx - minx + 1), dtype=flux.dtype)
-    np.add.at(img, (y - miny, x - minx), flux)
-    return img
+    ncols = maxx - minx + 1
+    nrows = maxy - miny + 1
+
+    # Assumes all x,y are in-bounds within the given bounds
+    flat_idx = (y - miny) * ncols + (x - minx)
+    counts = np.bincount(flat_idx, weights=flux, minlength=nrows * ncols)
+    return counts.reshape((nrows, ncols)).astype(flux.dtype, copy=False)
 
 
 def _replace_nans(fluxes):
