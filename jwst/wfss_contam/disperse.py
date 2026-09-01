@@ -165,8 +165,13 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
     if model_counts is not None and len(model_counts) > 0:
         sorted_model_counts = [mc[sort_idx] for mc in model_counts]
 
-    # Compute per-source bounds in a vectorized way
-    unique_ids, split_points = np.unique(sorted_ids, return_index=True)
+    # Compute per-source bounds in a vectorized way, taking advantage
+    # of source_ids already being sorted.
+    is_boundary = np.empty(len(sorted_ids), dtype=bool)
+    is_boundary[0] = True
+    np.not_equal(sorted_ids[1:], sorted_ids[:-1], out=is_boundary[1:])
+    split_points = np.flatnonzero(is_boundary)
+    unique_ids = sorted_ids[split_points]
     minxs = np.minimum.reduceat(sorted_xs, split_points)
     maxxs = np.maximum.reduceat(sorted_xs, split_points)
     minys = np.minimum.reduceat(sorted_ys, split_points)
