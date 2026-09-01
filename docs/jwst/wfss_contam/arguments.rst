@@ -45,8 +45,8 @@ The ``wfss_contam`` step uses the following optional arguments.
   depends on the machine hardware and whether multi-processing is enabled. Defaults to 5,000.
 
 ``--pdt_spacing``
-  An integer specifying the number of grid points to sample along each of the x, y, and
-  wavelength axes when building a cached lookup table that approximates the trace-shape
+  An integer specifying the spacing of the grid point sampling along the x and y
+  axes when building a cached lookup table that approximates the direct-to-grism
   transform used to disperse each pixel. Since the trace shape varies smoothly across the
   detector, interpolating from a coarse precomputed grid instead of evaluating the exact
   transform for every pixel can substantially speed up the step, at the cost of a small
