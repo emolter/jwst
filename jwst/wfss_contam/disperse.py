@@ -157,9 +157,7 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
         return outputs_by_source
 
     # First sort by source ID. xs, ys input here cannot be assumed sorted after get_clipped_pixels
-    # Be explicit about the kind of sort we want to ensure we get the fastest algorithm, since
-    # we know the source IDs are non-negative ints.
-    sort_idx = np.argsort(source_ids_per_pixel.astype(np.uint32), kind="stable")
+    sort_idx = np.argsort(source_ids_per_pixel)
     sorted_ids = source_ids_per_pixel[sort_idx]
     sorted_xs = xs[sort_idx]
     sorted_ys = ys[sort_idx]
