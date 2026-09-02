@@ -157,8 +157,9 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
         return outputs_by_source
 
     # First sort by source ID. xs, ys input here cannot be assumed sorted after get_clipped_pixels
-    # Sort is faster on uint16. Presumably source_id will never be greater than 65k
-    sort_idx = np.argsort(source_ids_per_pixel.astype(np.uint16), kind="stable")
+    # Be explicit about the kind of sort we want to ensure we get the fastest algorithm, since
+    # we know the source IDs are non-negative ints.
+    sort_idx = np.argsort(source_ids_per_pixel.astype(np.uint32), kind="stable")
     sorted_ids = source_ids_per_pixel[sort_idx]
     sorted_xs = xs[sort_idx]
     sorted_ys = ys[sort_idx]
@@ -167,12 +168,15 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
         sorted_model_counts = [mc[sort_idx] for mc in model_counts]
 
     # Compute per-source bounds in a vectorized way
-    # np.unique with return_index would re-sort the array. This is more verbose but faster.
+    # The following five lines used to be just
+    # `unique_ids, split_points = np.unique(sorted_ids, return_index=True)`
+    # but that re-sorts the array. This is more verbose but faster.
     is_boundary = np.empty(len(sorted_ids), dtype=bool)
     is_boundary[0] = True
     np.not_equal(sorted_ids[1:], sorted_ids[:-1], out=is_boundary[1:])
     split_points = np.flatnonzero(is_boundary)
     unique_ids = sorted_ids[split_points]
+
     minxs = np.minimum.reduceat(sorted_xs, split_points)
     maxxs = np.maximum.reduceat(sorted_xs, split_points)
     minys = np.minimum.reduceat(sorted_ys, split_points)
@@ -221,6 +225,15 @@ def _build_dispersed_image_of_source(x, y, flux, bounds):
     -------
     a : ndarray
         2-D dispersed image of the source
+
+    Notes
+    -----
+    This function used to read as
+        img = np.zeros((maxy - miny + 1, maxx - minx + 1), dtype=flux.dtype)
+        np.add.at(img, (y - miny, x - minx), flux)
+        return img
+    but bincount is much faster albeit less readable, since we need to cast to 1-d
+    and then cast back to 2-d at the end.
     """
     minx, maxx, miny, maxy = bounds
     ncols = maxx - minx + 1
@@ -460,7 +473,7 @@ def disperse(
     # get_clipped_pixels treats its (nlam, n_pixels) inputs as flattened in C order,
     # so `index` decomposes into a (wavelength, pixel) pair. Use that to gather
     # lambdas and source_ids_per_pixel from their small 1-D arrays, which is cheaper to compute
-    # than np.take on the full 2-d array.
+    # than, e.g., lambdas=np.take(lambdas, index)
     lam_idx, pixel_idx = np.divmod(index, n_pixels)
     lambdas = lam_grid[lam_idx]
     source_ids_per_pixel = source_ids_1d[pixel_idx]
