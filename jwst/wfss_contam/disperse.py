@@ -142,9 +142,9 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
     outputs_by_source : dict
         Dictionary containing dispersed images and bounds for each source ID
     """
-    # Chunks are pre-sorted by source ID before dispersing (see Observation.chunk_sources),
-    # so most chunks end up containing pixels from a single source only.
-    # In this case, skip the sort/group-by machinery below entirely.
+    # Chunks are pre-sorted by source ID before dispersing (see Observation.chunk_sources).
+    # Many observations have sources large enough that some chunks contain only pixels from
+    # a single source. The collect operation can be simplified a lot in that case.
     first_sid = source_ids_per_pixel[0]
     if (source_ids_per_pixel == first_sid).all():
         bounds = [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())]
@@ -157,7 +157,8 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
         return outputs_by_source
 
     # First sort by source ID. xs, ys input here cannot be assumed sorted after get_clipped_pixels
-    sort_idx = np.argsort(source_ids_per_pixel.astype(np.int16), kind="stable")
+    # Sort is faster on uint16. Presumably source_id will never be greater than 65k
+    sort_idx = np.argsort(source_ids_per_pixel.astype(np.uint16), kind="stable")
     sorted_ids = source_ids_per_pixel[sort_idx]
     sorted_xs = xs[sort_idx]
     sorted_ys = ys[sort_idx]
@@ -165,8 +166,8 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
     if model_counts is not None and len(model_counts) > 0:
         sorted_model_counts = [mc[sort_idx] for mc in model_counts]
 
-    # Compute per-source bounds in a vectorized way, taking advantage
-    # of source_ids already being sorted.
+    # Compute per-source bounds in a vectorized way
+    # np.unique with return_index would re-sort the array. This is more verbose but faster.
     is_boundary = np.empty(len(sorted_ids), dtype=bool)
     is_boundary[0] = True
     np.not_equal(sorted_ids[1:], sorted_ids[:-1], out=is_boundary[1:])
@@ -202,11 +203,30 @@ def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_count
 
 
 def _build_dispersed_image_of_source(x, y, flux, bounds):
+    """
+    Convert a flattened list of pixels to a 2-D grism image of that source.
+
+    Parameters
+    ----------
+    x : ndarray
+        X coordinates of pixels in the grism image
+    y : ndarray
+        Y coordinates of pixels in the grism image
+    flux : ndarray
+        Fluxes of pixels in the grism image
+    bounds : list
+        Pre-computed [minx, maxx, miny, maxy] bounds for the source.
+
+    Returns
+    -------
+    a : ndarray
+        2-D dispersed image of the source
+    """
     minx, maxx, miny, maxy = bounds
     ncols = maxx - minx + 1
     nrows = maxy - miny + 1
 
-    # Assumes all x,y are in-bounds within the given bounds
+    # Cast into 1-D so we can use bincount, which is faster than np.add.at
     flat_idx = (y - miny) * ncols + (x - minx)
     counts = np.bincount(flat_idx, weights=flux, minlength=nrows * ncols)
     return counts.reshape((nrows, ncols)).astype(flux.dtype, copy=False)
@@ -385,11 +405,8 @@ def disperse(
     )
     dlam = lambdas[1] - lambdas[0]
     nlam = len(lambdas)
-    # lam_grid and source_ids_1d are the true (non-redundant) 1-D information content of
-    # the (nlam, n_pixels) arrays built below: lambdas is constant along the pixel axis,
-    # source_ids_per_pixel is constant along the wavelength axis. Kept around so the
-    # post-clipping gather below can read from these small arrays instead of their much
-    # larger, mostly-redundant (nlam, n_pixels) broadcasts.
+    # Keep 1-d versions of lambdas, source_ids_per_pixel around so the gather below
+    # can index based on these smaller arrays instead of the (nlam, n_pixels) broadcasts.
     n_pixels = len(source_ids_per_pixel)
     lam_grid = lambdas
     source_ids_1d = source_ids_per_pixel
@@ -441,9 +458,9 @@ def disperse(
     del x0s, y0s
 
     # get_clipped_pixels treats its (nlam, n_pixels) inputs as flattened in C order,
-    # so `index` decomposes cleanly into a (wavelength, pixel) pair. Use that to gather
-    # lambdas and source_ids_per_pixel from their small 1-D arrays instead of from the
-    # large (nlam, n_pixels) broadcasts, which is cheaper to compute.
+    # so `index` decomposes into a (wavelength, pixel) pair. Use that to gather
+    # lambdas and source_ids_per_pixel from their small 1-D arrays, which is cheaper to compute
+    # than np.take on the full 2-d array.
     lam_idx, pixel_idx = np.divmod(index, n_pixels)
     lambdas = lam_grid[lam_idx]
     source_ids_per_pixel = source_ids_1d[pixel_idx]
