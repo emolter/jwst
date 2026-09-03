@@ -1023,7 +1023,7 @@ class DataSet:
             # Fluxes are in units of Jy
             flux_unit = "Jy"
             flux_squared_unit = "Jy^2"
-            for att in ["FLUX", "FLUX_ERROR"]:
+            for att in ["FLUX", "FLUX_ERROR", "CONTAM_FLUX"]:
                 spec.spec_table[att][self.integ_row] *= conversion
                 spec.spec_table.columns[att].unit = flux_unit
             for att in ["FLUX_VAR_POISSON", "FLUX_VAR_RNOISE", "FLUX_VAR_FLAT"]:
@@ -1045,7 +1045,13 @@ class DataSet:
                 conv_sb = conversion / self.sb_conversion
             sb_unit = "MJy/sr"
             sb_var_unit = "MJy^2 / sr^2"
-            for att in ["BACKGROUND", "BKGD_ERROR", "SURF_BRIGHT", "SB_ERROR"]:
+            for att in [
+                "BACKGROUND",
+                "BKGD_ERROR",
+                "SURF_BRIGHT",
+                "SB_ERROR",
+                "CONTAM_SURF_BRIGHT",
+            ]:
                 spec.spec_table[att][self.integ_row] *= conv_sb
                 spec.spec_table.columns[att].unit = sb_unit
             for att in [
