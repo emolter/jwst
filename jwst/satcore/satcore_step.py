@@ -16,7 +16,6 @@ class SatCoreStep(Step):
     class_alias = "satcore"
 
     spec = """
-    Add here.
     """
 
     def process(self, step_input):
