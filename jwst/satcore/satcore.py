@@ -1,90 +1,11 @@
 import numpy as np
 import stpsf
-from astropy.time import Time
 from photutils.psf import PSFPhotometry
 from photutils.segmentation import SourceCatalog, SourceFinder
 from scipy.ndimage import distance_transform_edt
 from stdatamodels.jwst.datamodels import dqflags
 
 from jwst.tweakreg.tweakreg_catalog import JWSTBackground
-
-
-def setup_sim_to_match_model(model, verbose=True, plot=False, choice="closest"):
-    """
-    Set up a stpsf Instrument instance matched to a given dataset.
-
-    Parameters
-    ----------
-    model : `~stdatamodels.jwst.datamodels.JwstDataModel`
-        JWST data model to match.
-    choice : str
-        Method to choose which OPD file to use, e.g. 'before', 'after', or 'closest', for
-        JWST data. Not currently relevant for Roman.
-
-    Returns
-    -------
-    stpsf.Instrument
-        An STSPF instrument instance.
-    """
-    exptype = model.meta.exposure.type
-    filt = model.meta.instrument.filter
-    pupil = model.meta.instrument.pupil
-    apername = model.meta.aperture.name
-    channel = model.meta.instrument.channel
-    band = model.meta.instrument.band
-    inst = stpsf.instrument(model.meta.instrument.name)
-
-    if inst.name == "MIRI" and exptype == "MIR_MRS":
-        inst.mode = "IFU"
-        # There is no FILTER keyword for MRS, so don't set filter to anything.
-    elif inst.name == "MIRI" and filt == "P750L":
-        # stpsf doesn't model the MIRI LRS prism spectral response
-        inst.filter = "F770W"
-    elif (inst.name == "NIRCam") and (pupil[0] == "F") and (pupil[-1] in ["N", "M"]):
-        # These NIRCam filters are physically in the pupil wheel, but still act as filters.
-        # Grab the filter name from the PUPIL keyword in this case.
-        inst.filter = pupil
-    elif (inst.name == "NIRISS") and (filt == "CLEAR"):
-        # For NIRISS, 6 out of 12 filters are in the pupil wheel, which mean if FILTER=CLEAR,
-        # PUPIL keyword will point to the actual filter. [S. T. Sohn Feb 13, 2025]
-        inst.filter = pupil
-    else:
-        inst.filter = filt
-    inst.set_position_from_aperture_name(apername)
-
-    dateobs = Time(model.meta.observation.date + "T" + model.meta.observation.time)
-    inst.load_wss_opd_by_date(dateobs, verbose=verbose, plot=plot, choice=choice)
-
-    # per-instrument specializations
-    if inst.name == "NIRCam":
-        if pupil.startswith("MASK"):
-            pass
-
-        elif pupil != "CLEAR" and not pupil.startswith("F"):  # no action needed for these
-            # note that filters in the pupil wheel were handled already above
-            inst.pupil_mask = pupil
-
-    elif inst.name == "MIRI":
-        if exptype == "MIR_MRS":
-            ch = channel
-            band_lookup = {"SHORT": "A", "MEDIUM": "B", "LONG": "C"}
-            inst.band = str(ch) + band_lookup[band]
-
-        elif inst.filter in ["F1065C", "F1140C", "F1550C"]:
-            inst.image_mask = "FQPM" + inst.filter[1:5]
-        elif inst.filter == "F2300C":
-            inst.image_mask = "LYOT2300"
-        elif filt == "P750L":
-            inst.pupil_mask = "P750L"
-
-        if apername == "MIRIM_SLIT":
-            inst.image_mask = "LRS slit"
-
-    elif inst.name == "NIRISS":
-        if pupil == "NRM":  # else could be CLEARP for KPI observations
-            inst.pupil_mask = "MASK_NRM"
-
-    return inst
 
 
 def _fill_nan_with_nearest(array):
@@ -143,13 +64,13 @@ def _find_bright_sources(infill_data, mask=None):  # noqa: ARG001
     """
     detection_threshold = 10.0
     segmentation_finder = SourceFinder(
-        npixels=7, connectivity=8, deblend=True, nlevels=8, contrast=0.5
+        n_pixels=7, connectivity=8, deblend=True, n_levels=8, contrast=0.5
     )
     segmentation = segmentation_finder(infill_data, detection_threshold)
     if segmentation is None:
         return None
     catalog = SourceCatalog(infill_data, segmentation)
-    return catalog.to_table(columns=("xcentroid", "ycentroid"))
+    return catalog.to_table(columns=("x_centroid", "y_centroid"))
 
 
 def _replace_cores_with_model(data, fit_image, x_fit, y_fit, box_halfwidth=10):
@@ -227,10 +148,8 @@ def infill_saturated_cores(model, oversample=3, num_psfs=36, fov_pixels=51, repl
     # Replace NaNs in input data so the source detector can find saturated cores
     infill_data = _fill_nan_with_nearest(data)
 
-    # very helpful stpsf helper handles all instrument/filter setup for us
-    # TODO: need a version of this that operates on a datamodel
-    # otherwise not compatible with Step formalisms
-    inst = setup_sim_to_match_model(model)
+    # very helpful stpsf utility handles all instrument/filter setup for us
+    inst = stpsf.setup_sim_to_match_file(model)
     grid = inst.psf_grid(
         num_psfs=num_psfs,
         all_detectors=False,
@@ -249,7 +168,6 @@ def infill_saturated_cores(model, oversample=3, num_psfs=36, fov_pixels=51, repl
     # the PSF fitting portion of the algorithm. So this setup gives us the best of both worlds-
     # we effectively are using infilled data for source finding, and original data for fitting.
     results = psfphot(infill_data, mask=mask, error=err)
-    results.pprint_all()
     fit_image = psfphot.make_model_image(data.shape)
 
     simcore_image, simcore_mask = _replace_cores_with_model(
@@ -264,5 +182,5 @@ def infill_saturated_cores(model, oversample=3, num_psfs=36, fov_pixels=51, repl
     simcore_image += bkg.background
     model.data = simcore_image
     dqval = dqflags.pixel["FLUX_ESTIMATED"]
-    model.dq[simcore_mask.astype(bool)] += dqval
+    model.dq[simcore_mask.astype(bool)] = dqval
     return model
