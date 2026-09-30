@@ -10,6 +10,7 @@ from jwst.datamodels import ModelLibrary
 from jwst.lib.exposure_types import is_moving_target
 from jwst.outlier_detection import outlier_detection_step
 from jwst.resample import resample_step
+from jwst.satcore import satcore_step
 from jwst.skymatch import skymatch_step
 from jwst.source_catalog import source_catalog_step
 from jwst.stpipe import Pipeline
@@ -39,6 +40,7 @@ class Image3Pipeline(Pipeline):
     step_defs = {
         "assign_mtwcs": assign_mtwcs_step.AssignMTWcsStep,
         "tweakreg": tweakreg_step.TweakRegStep,
+        "satcore": satcore_step.SatCoreStep,
         "skymatch": skymatch_step.SkyMatchStep,
         "outlier_detection": outlier_detection_step.OutlierDetectionStep,
         "resample": resample_step.ResampleStep,
@@ -74,6 +76,9 @@ class Image3Pipeline(Pipeline):
             # If input is an association, set the output to the product name.
             self.output_file = input_models.asn["products"][0]["name"]
 
+        # infill saturated cores
+        input_models = self.satcore.run(input_models)
+
         # Check if input is single or multiple exposures
         has_groups = len(input_models.group_names) >= 1
 
@@ -87,6 +92,21 @@ class Image3Pipeline(Pipeline):
                 input_models = self.tweakreg.run(input_models)
 
             input_models = self.skymatch.run(input_models)
+            # with input_models:
+            #     model = input_models.borrow(0)
+            #     data = model.data
+            #     dq = model.dq
+            #     input_models.shelve(model)
+            # import matplotlib.pyplot as plt
+            # import numpy as np
+            # from matplotlib.colors import LogNorm
+            # fig, (ax0, ax1) = plt.subplots(1, 2)
+            # vmax = np.nanmax(data)/2
+            # cim = ax0.imshow(data, origin="lower", cmap="gray", norm=LogNorm(vmin=0.1, vmax=vmax))
+            # fig.colorbar(cim, ax=ax0)
+            # cim = ax1.imshow(dq, origin="lower")
+            # fig.colorbar(cim, ax=ax1)
+            # plt.show()
             input_models = self.outlier_detection.run(input_models)
 
         elif self.skymatch.skymethod == "match":

@@ -183,4 +183,39 @@ def infill_saturated_cores(model, oversample=3, num_psfs=36, fov_pixels=51, repl
     model.data = simcore_image
     dqval = dqflags.pixel["FLUX_ESTIMATED"]
     model.dq[simcore_mask.astype(bool)] = dqval
+    model = _replace_err_arrays(model, simcore_mask)
+    return model
+
+
+def _replace_err_arrays(model, simcore_mask, percentile=99):
+    """
+    Estimate the error arrays based on the fractional error of other bright pixels.
+
+    Parameters
+    ----------
+    model : `~stdatamodels.jwst.datamodels.JwstDataModel`
+        The input model, with pixels already infilled in the data array.
+    simcore_mask : np.array
+        Boolean mask where True indicates the pixel was infilled.
+    percentile : int, optional
+        The percentile of the brightest pixels to use for estimating the fractional error.
+
+    Returns
+    -------
+    `~stdatamodels.jwst.datamodels.JwstDataModel`
+        The input model with updated error arrays.
+    """
+    for att in ["err", "var_rnoise", "var_flat", "var_poisson"]:
+        arr = getattr(model, att)
+        data = model.data.copy()
+        # remove the infilled pixels
+        data[simcore_mask.astype(bool)] = np.nan
+        # find brightest pixels
+        highest = np.nanpercentile(data, percentile)
+        is_bright = data >= highest
+        # figure out how much fractional error those pixels have
+        fractional_err = np.nanmean(arr[is_bright] / model.data[is_bright])
+        # set the infilled pixels to have the same amount of fractional error
+        arr[simcore_mask.astype(bool)] = model.data[simcore_mask.astype(bool)] * fractional_err
+        setattr(model, att, arr)
     return model
