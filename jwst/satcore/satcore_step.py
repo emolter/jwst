@@ -4,7 +4,7 @@ from stdatamodels import filetype
 from stdatamodels.jwst.datamodels import ImageModel
 
 from jwst.datamodels import ModelContainer, ModelLibrary
-from jwst.satcore.satcore import infill_saturated_cores
+from jwst.satcore.satcore import infill_saturated_cores, make_unique_grids
 from jwst.stpipe import Step, record_step_status
 
 __all__ = ["SatCoreStep"]
@@ -63,14 +63,20 @@ class SatCoreStep(Step):
             # Input is not recognized
             raise TypeError(f"Input {step_input} is not a 2D image.")
 
+        # First build PSF grids only for unique instrument/filter/detector
+        unique_grids = make_unique_grids(
+            output_models,
+            oversample=self.oversample,
+            num_psfs=self.num_psfs,
+            fov_pixels=self.fov_pixels,
+        )
+
+        # Use pre-computed PSF grids to infill saturated pixels in cores
         with output_models:
             for model in output_models:
-                # Call the main routine on each model
-                # pre = model.data.copy()
                 model = infill_saturated_cores(
                     model,
-                    oversample=self.oversample,
-                    num_psfs=self.num_psfs,
+                    unique_grids,
                     fov_pixels=self.fov_pixels,
                     replace_boxsize=self.replace_boxsize,
                 )

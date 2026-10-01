@@ -110,7 +110,41 @@ def _replace_cores_with_model(data, fit_image, x_fit, y_fit, box_halfwidth=10):
     return result, full_mask
 
 
-def infill_saturated_cores(model, oversample=3, num_psfs=36, fov_pixels=51, replace_boxsize=20):
+def _replace_err_arrays(model, percentile=99):
+    """
+    Estimate the error arrays based on the fractional error of other bright pixels.
+
+    Parameters
+    ----------
+    model : `~stdatamodels.jwst.datamodels.JwstDataModel`
+        The input model, with pixels already infilled in the data array,
+        and the DQ flags updated with FLUX_ESTIMATED at the infilled pixels.
+    percentile : int, optional
+        The percentile of the brightest pixels to use for estimating the fractional error.
+
+    Returns
+    -------
+    `~stdatamodels.jwst.datamodels.JwstDataModel`
+        The input model with updated error arrays.
+    """
+    simcore_mask = model.dq & dqflags.pixel["FLUX_ESTIMATED"]
+    for att in ["err", "var_rnoise", "var_flat", "var_poisson"]:
+        arr = getattr(model, att)
+        data = model.data.copy()
+        # remove the infilled pixels
+        data[simcore_mask.astype(bool)] = np.nan
+        # find brightest pixels
+        highest = np.nanpercentile(data, percentile)
+        is_bright = data >= highest
+        # figure out how much fractional error those pixels have
+        fractional_err = np.nanmean(arr[is_bright] / model.data[is_bright])
+        # set the infilled pixels to have the same amount of fractional error
+        arr[simcore_mask.astype(bool)] = model.data[simcore_mask.astype(bool)] * fractional_err
+        setattr(model, att, arr)
+    return model
+
+
+def infill_saturated_cores(model, grids, fov_pixels=51, replace_boxsize=20):
     """
     Find saturated point source in the image and fill them with simulated PSF models.
 
@@ -125,10 +159,8 @@ def infill_saturated_cores(model, oversample=3, num_psfs=36, fov_pixels=51, repl
     ----------
     model : `~jwst.datamodels.DataModel`
         The input data model containing the image with saturated point sources.
-    oversample : int, optional
-        The oversampling factor for the PSF model, by default 3.
-    num_psfs : int, optional
-        The number of PSFs to generate for the PSF grid, by default 36.
+    grids : dict
+        Dictionary of unique PSF grids keyed by instrument, detector, and filter combination.
     fov_pixels : int, optional
         The size of the field of view in pixels for the PSF fitting, by default 51.
     replace_boxsize : int, optional
@@ -148,15 +180,14 @@ def infill_saturated_cores(model, oversample=3, num_psfs=36, fov_pixels=51, repl
     # Replace NaNs in input data so the source detector can find saturated cores
     infill_data = _fill_nan_with_nearest(data)
 
-    # very helpful stpsf utility handles all instrument/filter setup for us
-    inst = stpsf.setup_sim_to_match_file(model)
-    grid = inst.psf_grid(
-        num_psfs=num_psfs,
-        all_detectors=False,
-        verbose=True,
-        oversample=oversample,
-        fov_pixels=fov_pixels,
+    # Find the appropriate PSF grid from the dict
+    key = (
+        model.meta.instrument.name,
+        model.meta.instrument.detector,
+        model.meta.instrument.filter,
+        model.meta.aperture.name,
     )
+    grid = grids[key]
 
     fit_shape = (fov_pixels, fov_pixels)
     psfphot = PSFPhotometry(
@@ -187,35 +218,50 @@ def infill_saturated_cores(model, oversample=3, num_psfs=36, fov_pixels=51, repl
     return model
 
 
-def _replace_err_arrays(model, simcore_mask, percentile=99):
+def make_unique_grids(library, oversample=3, num_psfs=36, fov_pixels=51):
     """
-    Estimate the error arrays based on the fractional error of other bright pixels.
+    Generate all PSF grids necessary to process a list of models.
+
+    This function reads the metadata of the models to figure out which PSF grids
+    to make, avoiding repeated generation of the same grid for different dithers
+    of the same detector.
 
     Parameters
     ----------
-    model : `~stdatamodels.jwst.datamodels.JwstDataModel`
-        The input model, with pixels already infilled in the data array.
-    simcore_mask : np.array
-        Boolean mask where True indicates the pixel was infilled.
-    percentile : int, optional
-        The percentile of the brightest pixels to use for estimating the fractional error.
+    library : `~jwst.datamodels.ModelLibrary`
+        The list of input data models.
+    oversample : int, optional
+        The oversampling factor for the PSF grids.
+    num_psfs : int, optional
+        The number of PSFs to generate for each grid.
+    fov_pixels : int, optional
+        The field of view in pixels for the PSF grids.
 
     Returns
     -------
-    `~stdatamodels.jwst.datamodels.JwstDataModel`
-        The input model with updated error arrays.
+    unique_grids : dict
+        A dictionary mapping unique detector configurations to their corresponding PSF grids.
     """
-    for att in ["err", "var_rnoise", "var_flat", "var_poisson"]:
-        arr = getattr(model, att)
-        data = model.data.copy()
-        # remove the infilled pixels
-        data[simcore_mask.astype(bool)] = np.nan
-        # find brightest pixels
-        highest = np.nanpercentile(data, percentile)
-        is_bright = data >= highest
-        # figure out how much fractional error those pixels have
-        fractional_err = np.nanmean(arr[is_bright] / model.data[is_bright])
-        # set the infilled pixels to have the same amount of fractional error
-        arr[simcore_mask.astype(bool)] = model.data[simcore_mask.astype(bool)] * fractional_err
-        setattr(model, att, arr)
-    return model
+    unique_grids = {}
+    with library:
+        for model in library:
+            # These are the four keys that the stpsf inst() method cares about.
+            # In a typical case for the image3 pipeline only detector really matters
+            # but the others don't hurt.
+            key = (
+                model.meta.instrument.name,
+                model.meta.instrument.detector,
+                model.meta.instrument.filter,
+                model.meta.aperture.name,
+            )
+            if key not in unique_grids:
+                inst = stpsf.setup_sim_to_match_file(model)
+                unique_grids[key] = inst.psf_grid(
+                    num_psfs=num_psfs,
+                    all_detectors=False,
+                    verbose=False,
+                    oversample=oversample,
+                    fov_pixels=fov_pixels,
+                )
+            library.shelve(model)
+    return unique_grids
