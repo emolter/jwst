@@ -98,19 +98,19 @@ def _replace_cores_with_model(data, fit_image, x_fit, y_fit, box_halfwidth=10):
         A mask indicating the pixels that were replaced, with 1 for replaced pixels and 0 otherwise.
     """
     result = np.array(data, copy=True)
-    full_mask = np.zeros_like(result)
+    full_mask = np.zeros(result.shape, dtype=bool)
     for xc, yc in zip(x_fit, y_fit, strict=True):
         y_min = int(max(yc - box_halfwidth, 0))
         y_max = int(min(yc + box_halfwidth + 1, result.shape[0]))
         x_min = int(max(xc - box_halfwidth, 0))
         x_max = int(min(xc + box_halfwidth + 1, result.shape[1]))
         mask = ~np.isfinite(result[y_min:y_max, x_min:x_max])
-        full_mask[y_min:y_max, x_min:x_max][mask] = 1
+        full_mask[y_min:y_max, x_min:x_max][mask] = True
         result[y_min:y_max, x_min:x_max][mask] = fit_image[y_min:y_max, x_min:x_max][mask]
     return result, full_mask
 
 
-def _replace_err_arrays(model, percentile=99):
+def _replace_err_arrays(model, percentile=99.0, modeling_error=0.05):
     """
     Estimate the error arrays based on the fractional error of other bright pixels.
 
@@ -119,8 +119,12 @@ def _replace_err_arrays(model, percentile=99):
     model : `~stdatamodels.jwst.datamodels.JwstDataModel`
         The input model, with pixels already infilled in the data array,
         and the DQ flags updated with FLUX_ESTIMATED at the infilled pixels.
-    percentile : int, optional
+    percentile : float, optional
         The percentile of the brightest pixels to use for estimating the fractional error.
+    modeling_error : float, optional
+        Minimum fractional error to assign to infilled pixels in the ``err`` array only,
+        to account for PSF-model uncertainty (e.g. centroid/flux fit residuals) that is not
+        captured by the fractional error estimated from nearby bright pixels.
 
     Returns
     -------
@@ -128,23 +132,34 @@ def _replace_err_arrays(model, percentile=99):
         The input model with updated error arrays.
     """
     simcore_mask = model.dq & dqflags.pixel["FLUX_ESTIMATED"]
+    # first put the NaNs back in where pixels have been replaced
+    data_with_nans = model.data.copy()
+    data_with_nans[simcore_mask > 0] = np.nan
+    # then figure out which pixels are bright in the original data
+    highest = np.nanpercentile(data_with_nans, percentile)
+    is_bright = data_with_nans >= highest
+    is_infilled = simcore_mask > 0
     for att in ["err", "var_rnoise", "var_flat", "var_poisson"]:
         arr = getattr(model, att)
-        data = model.data.copy()
-        # remove the infilled pixels
-        data[simcore_mask.astype(bool)] = np.nan
-        # find brightest pixels
-        highest = np.nanpercentile(data, percentile)
-        is_bright = data >= highest
-        # figure out how much fractional error those pixels have
-        fractional_err = np.nanmean(arr[is_bright] / model.data[is_bright])
+
+        if att == "var_rnoise":
+            # Read noise does not scale with flux, and var_rnoise sets the IVM resample weights.
+            arr[is_infilled] = np.nanmedian(arr[~is_infilled])
+            setattr(model, att, arr)
+            continue
+
+        # figure out the average fractional error of unsaturated bright pixels
+        fractional_err = np.nanmean(arr[is_bright] / data_with_nans[is_bright])
+        # Only err gets the floor: inflating other variances is not needed for outlier detection.
+        if att == "err":
+            fractional_err = max(fractional_err, modeling_error)
         # set the infilled pixels to have the same amount of fractional error
-        arr[simcore_mask.astype(bool)] = model.data[simcore_mask.astype(bool)] * fractional_err
+        arr[is_infilled] = model.data[is_infilled] * fractional_err
         setattr(model, att, arr)
     return model
 
 
-def infill_saturated_cores(model, grids, fov_pixels=51, replace_boxsize=20):
+def infill_saturated_cores(model, grids, fov_pixels=51, replace_boxsize=20, modeling_error=0.05):
     """
     Find saturated point source in the image and fill them with simulated PSF models.
 
@@ -165,6 +180,9 @@ def infill_saturated_cores(model, grids, fov_pixels=51, replace_boxsize=20):
         The size of the field of view in pixels for the PSF fitting, by default 51.
     replace_boxsize : int, optional
         The size of the box around each fitted position to replace NaN pixels, by default 20.
+    modeling_error : float, optional
+        Minimum fractional error floor to assign to infilled pixels, accounting for
+        PSF-model uncertainty that is not captured by photon-noise propagation alone.
 
     Returns
     -------
@@ -213,8 +231,10 @@ def infill_saturated_cores(model, grids, fov_pixels=51, replace_boxsize=20):
     simcore_image += bkg.background
     model.data = simcore_image
     dqval = dqflags.pixel["FLUX_ESTIMATED"]
-    model.dq[simcore_mask.astype(bool)] = dqval
-    model = _replace_err_arrays(model, simcore_mask)
+    model.dq[simcore_mask] = dqval
+    model = _replace_err_arrays(model, modeling_error=modeling_error)
+    model.dq[simcore_mask] = 0  # try to hack resample
+
     return model
 
 

@@ -24,7 +24,8 @@ class SatCoreStep(Step):
     oversample = integer(default=3) # PSF oversample factor.
     num_psfs = integer(default=36) # Number of points across detector to make an ePSF. Must be a square number.
     fov_pixels = integer(default=51) # Full-width in detector pixels of the PSF model that is fit.
-    replace_boxsize = integer(default=10) # Half-width of the box around each fitted star center to replace NaN pixels.
+    replace_boxsize = integer(default=30) # Full width of the box around each fitted star center to replace NaN pixels.
+    modeling_error = float(default=0.05) # Minimum fractional error floor for infilled pixels, accounting for PSF-model uncertainty.
     in_memory = boolean(default=True) # Whether to keep models in memory rather than on disk.
     """  # noqa: E501
 
@@ -79,6 +80,7 @@ class SatCoreStep(Step):
                     unique_grids,
                     fov_pixels=self.fov_pixels,
                     replace_boxsize=self.replace_boxsize,
+                    modeling_error=self.modeling_error,
                 )
                 output_models.shelve(model)
 
