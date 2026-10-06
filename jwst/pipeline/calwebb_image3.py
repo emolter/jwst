@@ -76,9 +76,6 @@ class Image3Pipeline(Pipeline):
             # If input is an association, set the output to the product name.
             self.output_file = input_models.asn["products"][0]["name"]
 
-        # infill saturated cores
-        input_models = self.satcore.run(input_models)
-
         # Check if input is single or multiple exposures
         has_groups = len(input_models.group_names) >= 1
 
@@ -91,6 +88,8 @@ class Image3Pipeline(Pipeline):
             else:
                 input_models = self.tweakreg.run(input_models)
 
+            # infill saturated cores
+            input_models = self.satcore.run(input_models)
             input_models = self.skymatch.run(input_models)
             # with input_models:
             #     model = input_models.borrow(0)
