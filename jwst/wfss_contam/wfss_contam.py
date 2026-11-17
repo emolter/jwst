@@ -1,19 +1,11 @@
 """Top-level module for WFSS contamination correction."""
 
 import logging
-import multiprocessing
 import types
 
 import numpy as np
-from stcal.multiprocessing import compute_num_cores
 from stdatamodels.jwst import datamodels
 
-from jwst.assign_wcs.util import (
-    get_bounding_box_extents,
-    validate_orders_against_reference,
-    validate_orders_against_transform,
-)
-from jwst.lib.catalog_utils import read_source_catalog
 from jwst.wfss_contam.observations import Observation
 from jwst.wfss_contam.sens1d import get_photom_data
 from jwst.wfss_contam.wavefit import (
@@ -180,29 +172,6 @@ def match_backplane_prefer_first(slit0, slit1):
     return slit1
 
 
-def _find_min_relresp(sens_waves, sens_response):
-    """
-    Find the minimum relative response in the sensitivity response.
-
-    Helper function is necessary instead of just nanmin because reference file
-    sometimes has zero-valued wavelength/response pairs.
-
-    Parameters
-    ----------
-    sens_waves : np.ndarray
-        Wavelengths corresponding to the sensitivity response.
-    sens_response : np.ndarray
-        Sensitivity response values.
-
-    Returns
-    -------
-    float
-        Minimum relative response value.
-    """
-    good = (sens_waves > 0) & (sens_response > 0) & np.isfinite(sens_waves)
-    return np.nanmin(sens_response[good])
-
-
 def _build_simulated_image_from_cutouts(simulated_cutouts, shape):
     """
     Reconstruct the full-frame simulated image from the simulated cutouts.
@@ -233,53 +202,6 @@ def _build_simulated_image_from_cutouts(simulated_cutouts, shape):
         y1 = min(y0 + slitmodel.ysize, nrows)
         full_image[y0:y1, x0:x1] += slitmodel.data[: y1 - y0, : x1 - x0]
     return full_image
-
-
-def _apply_magnitude_limit(
-    order, source_catalog, sens_wave, sens_response, magnitude_limit, min_relresp_order1
-):
-    """
-    Rescale the magnitude limit based on the sensitivity response for a given spectral order.
-
-    Parameters
-    ----------
-    order : int
-        Spectral order for which the magnitude limit is applied.
-    source_catalog : astropy.table.Table
-        The source catalog containing source IDs and isophotal AB magnitudes.
-    sens_wave : np.ndarray
-        The wavelengths corresponding to the sensitivity response.
-    sens_response : np.ndarray
-        The sensitivity response for the order.
-    magnitude_limit : float
-        The isophotal AB magnitude limit for sources to be included in the contamination correction.
-    min_relresp_order1 : float
-        Minimum relative response for order 1, used to scale the magnitude limit.
-
-    Returns
-    -------
-    list
-        List of source IDs that meet the magnitude limit criteria.
-    """
-    if order in [0, 1]:
-        # Magnitude limit is set according to order 1 sensitivity response
-        # and order 0 is a special case because it's not dispersed
-        order_mag_limit = magnitude_limit
-    else:
-        # Scale the magnitude limit according to the order sensitivity response
-        order_sens_factor = min_relresp_order1 / _find_min_relresp(sens_wave, sens_response)
-        order_mag_diff = -2.5 * np.log10(order_sens_factor)
-        order_mag_limit = magnitude_limit - order_mag_diff
-
-    # Select sources that are brighter than the magnitude limit
-    good_sources = source_catalog[source_catalog["isophotal_abmag"] < order_mag_limit]
-    if len(good_sources) == 0:
-        return None
-    log.info(
-        f"Applying magnitude limit of {order_mag_limit:.1f} to order {order}. "
-        f"Sources selected: {len(good_sources)}"
-    )
-    return good_sources["label"].tolist()
 
 
 def _match_simulated_cutouts(output_model, obs):
@@ -452,83 +374,15 @@ def _build_contam(output_model, per_source_simuls, simul_data, original_data):
     return contam_cuts
 
 
-def _reject_off_detector_bounds(
-    source_catalog, sky_to_grism, wlmin, wlmax, order, subarray_xsize, subarray_ysize
-):
-    """
-    Determine which sources have any part of their grism-frame bounding boxes on the detector.
-
-    Similar to the way bounding boxes are created in extract2d, but
-    this version does not create GrismObjects, does not distinguish
-    partially-on-detector sources, and just returns a boolean array indicating which
-    sources are on the detector.
-
-    Parameters
-    ----------
-    source_catalog : `~astropy.table.QTable`
-        The catalog of sources with sky bounding boxes.
-    sky_to_grism : callable
-        A function that maps sky coordinates and wavelength to grism-frame coordinates.
-        This should be the "world" to "grism_detector" transform. For MultiSlitModel remember
-        that each SlitModel's input_model also has a "grism_slit" frame that must be bypassed.
-    wlmin, wlmax : float
-        The minimum/maximum wavelength for the grism order as set by the wavelengthrange file.
-    order : int
-        The spectral order to consider.
-    subarray_xsize, subarray_ysize : int
-        The size of the detector subarray in the x- and y-direction.
-
-    Returns
-    -------
-    np.ndarray
-        Boolean array indicating which sources are on the detector.
-    """
-    ra_corners = np.array(
-        [
-            source_catalog["sky_bbox_ll"].ra.value,
-            source_catalog["sky_bbox_lr"].ra.value,
-            source_catalog["sky_bbox_ul"].ra.value,
-            source_catalog["sky_bbox_ur"].ra.value,
-        ]
-    )
-    dec_corners = np.array(
-        [
-            source_catalog["sky_bbox_ll"].dec.value,
-            source_catalog["sky_bbox_lr"].dec.value,
-            source_catalog["sky_bbox_ul"].dec.value,
-            source_catalog["sky_bbox_ur"].dec.value,
-        ]
-    )
-    xmin, xmax, ymin, ymax = get_bounding_box_extents(
-        ra_corners, dec_corners, sky_to_grism, wlmin, wlmax, order
-    )
-    infinite = ~np.isfinite(np.asarray([xmin, xmax, ymin, ymax]))
-    any_non_finite = np.sum(infinite, axis=0) > 0
-
-    # check against bounds
-    xmin_too_big = xmin > subarray_xsize - 1
-    xmax_too_small = xmax < 0
-    ymin_too_big = ymin > subarray_ysize - 1
-    ymax_too_small = ymax < 0
-    bad = xmin_too_big | xmax_too_small | ymin_too_big | ymax_too_small | any_non_finite
-    return ~bad
-
-
 def contam_corr(
     input_model,
+    pdt,
     waverange,
     photom,
-    max_cores,
-    orders=None,
-    magnitude_limit=None,
-    max_pixels_per_chunk=5e4,
-    oversample_factor=2,
     polyfit_degree=None,
     n_iterations=1,
     l2_alpha=0.1,
     rejection_threshold=0.1,
-    pdt_spacing=None,
-    pdt_wl_oversample=1,
 ):
     """
     Correct contamination in WFSS spectral cutouts.
@@ -538,32 +392,14 @@ def contam_corr(
     input_model : `~stdatamodels.jwst.datamodels.MultiSlitModel`
         Input data model containing 2D spectral cutouts. May be modified by processing:
         make a copy before calling this function, if needed.
+    pdt : dict
+        Dictionary of precomputed geometry for each spectral order.
     waverange : `~stdatamodels.jwst.datamodels.WavelengthrangeModel`
         Wavelength range reference file model
     photom : `~stdatamodels.jwst.datamodels.NrcWfssPhotomModel`, \
              `~stdatamodels.jwst.datamodels.NisWfssPhotomModel`, \
              or `~stdatamodels.jwst.datamodels.MirWfssPhotomModel`
         Photom (flux cal) reference file model
-    max_cores : str or int
-        Number of cores to use for multiprocessing. If set to 'none'
-        (the default), then no multiprocessing will be done. The other
-        allowable string values are 'quarter', 'half', and 'all', which indicate
-        the fraction of cores to use for multi-proc. The total number of
-        cores includes the SMT cores (Hyper Threading for Intel).
-        If an integer is provided, it will be the exact number of cores used.
-    orders : list, optional
-        List of spectral orders to process.
-        If None, all orders defined in the wavelengthrange file will be processed.
-    magnitude_limit : float, optional
-        Isophotal AB magnitude limit for sources to be included in the contamination correction.
-        The magnitude limit is applied per spectral order, where the orders are scaled relative
-        to order 0 based on their photometric response as read from the photom reference file.
-        This means that generally fewer sources will be dispersed in higher orders.
-        If None, no magnitude limit is applied and all sources are included.
-    max_pixels_per_chunk : int, optional
-        Maximum number of pixels to disperse simultaneously.
-    oversample_factor : int, optional
-        Wavelength oversampling factor.
     polyfit_degree : int, optional
         Degree of polynomial fit to spectral shape. If None (the default), do not attempt
         polynomial fitting and just use the flat-spectrum simulation.
@@ -580,16 +416,6 @@ def contam_corr(
     rejection_threshold : float, optional
         Threshold for rejecting fits based on the fitted constant term coefficient, passed to
         `~jwst.wfss_contam.wavefit.fit_cutout_by_basis_images`.
-    pdt_spacing : int, optional
-        Pixel spacing along each of the x, y, and wavelength axes when
-        building the PDT. If None, the exact grism-to-detector transform
-        will be evaluated at every pixel.
-    pdt_wl_oversample : float, optional
-        Oversampling factor for the pixel dispersion table wavelength grid, relative to the
-        native dispersion scale. If None, the lookup table's wavelength grid
-        exactly matches the dispersal wavelength grid, allowing wavelength-axis
-        interpolation to be skipped entirely when evaluating the PDT. Only
-        used if ``pdt_spacing`` is not None.
 
     Returns
     -------
@@ -599,10 +425,6 @@ def contam_corr(
     simul_model : `~stdatamodels.jwst.datamodels.ImageModel`
         Full-frame simulated image of the grism exposure
     """
-    max_available_cores = multiprocessing.cpu_count()
-    # don't worry about case where nchunks < ncpus; just set nchunks large for now
-    ncpus = compute_num_cores(max_cores, 1e10, max_available_cores)
-
     # Get the segmentation map and direct image for this grism exposure
     direct_file = input_model.meta.direct_image
     log.debug(f"Direct image ={direct_file}")
@@ -617,26 +439,6 @@ def contam_corr(
                 f"covering {band_wavelengths[0]:.4f} to {band_wavelengths[-1]:.4f} microns"
             )
         direct_image = direct_model.data
-        direct_image_wcs = direct_model.meta.wcs
-
-    # Get the grism WCS object from the first cutout in the input model.
-    # This WCS is used to transform from direct image to grism frame for all sources
-    # in the segmentation map.
-    # The "detector" to "grism_detector" and "world" to "detector" transforms are identical
-    # for all sources, so just use the first one. The "grism_detector" to "grism_slit"
-    # transform is not used by the step.
-    grism_wcs = input_model.slits[0].meta.wcs
-
-    # Find out how many spectral orders are defined based on the
-    # array of order values in the Wavelengthrange ref file,
-    # then constrain the orders to the user-specified ones
-    spec_orders = np.asarray(waverange.order)
-    spec_orders = validate_orders_against_reference(orders, spec_orders)
-    spec_orders = validate_orders_against_transform(grism_wcs, spec_orders)
-    if len(spec_orders) == 0:
-        log.error("No valid spectral orders found. Step will be SKIPPED.")
-        return input_model, None
-    log.info(f"Spectral orders requested = {[int(x) for x in spec_orders]}")
 
     # Get the FILTER and PUPIL wheel positions, for use later
     filter_kwd = input_model.meta.instrument.filter
@@ -656,31 +458,15 @@ def contam_corr(
     else:
         filter_name = filter_kwd
 
-    # Read the source catalog to perform magnitude-based source selection later
-    # mag limit will be scaled according to order 1 sensitivity
-    source_catalog = read_source_catalog(input_model.meta.source_catalog)
-    if magnitude_limit is not None:
-        order1_wave_response, order1_sens_response = get_photom_data(
-            photom, filter_kwd, pupil_kwd, subarray_kwd, order=1
-        )
-        min_relresp_order1 = _find_min_relresp(order1_wave_response, order1_sens_response)
+    # set up observation object to model
+    obs = Observation(
+        direct_image,
+        pdt,
+        boundaries=[0, subarray_xsize - 1, 0, subarray_ysize - 1],
+        band_wavelengths=band_wavelengths,
+    )
 
-    # set up observation object to disperse
-    with datamodels.open(input_model.meta.segmentation_map) as seg_model:
-        obs = Observation(
-            direct_image,
-            seg_model.data,
-            grism_wcs,
-            direct_image_wcs,
-            boundaries=[0, subarray_xsize - 1, 0, subarray_ysize - 1],
-            max_cpu=ncpus,
-            max_pixels_per_chunk=max_pixels_per_chunk,
-            oversample_factor=oversample_factor,
-            band_wavelengths=band_wavelengths,
-        )
-
-    no_sources = True
-    for order in spec_orders:
+    for order in pdt.keys():
         # Load lists of wavelength ranges and flux cal info
         wavelength_range = waverange.get_wfss_wavelength_range(filter_name, [order])
         wmin = wavelength_range[order][0]
@@ -697,77 +483,20 @@ def contam_corr(
         if polyfit_degree is not None:
             basis_models = [_LegendreFluxModel(k, wmin, wmax) for k in range(1, polyfit_degree + 1)]
 
-        # Constrain the source IDs to those that are below the magnitude limit
-        selected_ids = None
-        if magnitude_limit is not None:
-            good_ids = _apply_magnitude_limit(
-                order,
-                source_catalog,
-                sens_waves,
-                sens_response,
-                magnitude_limit,
-                min_relresp_order1,
-            )
-            if not good_ids:
-                log.info(
-                    f"No sources meet the magnitude limit of {magnitude_limit} for order {order} ."
-                    "Skipping contamination correction for this order."
-                )
-                continue
-        else:
-            good_ids = source_catalog["label"].tolist()
-
-        # further constrain by checking against grism-frame detector extent
-        source_catalog.add_index("label")
-        sourcecat = source_catalog.loc[good_ids]
-        is_in_bounds = _reject_off_detector_bounds(
-            sourcecat,
-            grism_wcs.get_transform("world", "grism_detector"),
-            wmin,
-            wmax,
-            order,
-            input_model.meta.subarray.xsize,
-            input_model.meta.subarray.ysize,
-        )
-        selected_ids = np.array(good_ids)[is_in_bounds]
-        log.info(
-            f"Number of selected IDs for order {order} after checking bounding box against "
-            f"detector bounds: {len(selected_ids)}"
-        )
-        if not len(selected_ids):
-            log.info(
-                f"No sources meet the magnitude limit of {magnitude_limit} for order {order} "
-                "and also disperse onto the detector. "
-                "Skipping contamination correction for this order."
-            )
-            continue
-        no_sources = False
-
         # Compute the dispersion for all sources in this order
         log.info(f"Creating full simulated grism image for order {order}")
-        obs.disperse_order(
+        obs.simulate_order(
             order,
-            wmin,
-            wmax,
             sens_waves,
             sens_response,
-            selected_ids,
             basis_models=basis_models,
-            pdt_spacing=pdt_spacing,
-            pdt_wl_oversample=pdt_wl_oversample,
         )
-
-    if no_sources:
-        log.error(
-            f"No sources found that met the magnitude limit {magnitude_limit}. Step will be SKIPPED"
-        )
-        return input_model, None
 
     # Copy the input model so that adding result attributes does not modify it,
     # then retain only cutouts with simulated counterparts.
     output_model = input_model.copy()
     for i in reversed(range(len(output_model.slits))):
-        if output_model.slits[i].source_id not in obs.source_ids:
+        if output_model.slits[i].source_id not in [c.source_id for c in obs.simulated_cutouts]:
             del output_model.slits[i]
 
     # Hold onto the unchanged input data so iterative corrections always start

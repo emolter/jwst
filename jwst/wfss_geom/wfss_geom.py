@@ -657,7 +657,7 @@ def disperse_all(
         )
 
     no_sources = True
-    pdt = {"orders": {}}
+    pdt = {}
     for order in spec_orders:
         # Load lists of wavelength ranges and flux cal info
         wavelength_range = waverange.get_wfss_wavelength_range(filter_name, [order])
@@ -716,7 +716,7 @@ def disperse_all(
 
         # Compute the dispersion for all sources in this order
         log.info(f"Creating full simulated grism image for order {order}")
-        pdt["orders"][int(order)] = obs.disperse_order(
+        pdt[int(order)] = obs.disperse_order(
             order,
             wmin,
             wmax,

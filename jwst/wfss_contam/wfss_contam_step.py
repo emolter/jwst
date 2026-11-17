@@ -5,6 +5,7 @@ from stdatamodels.jwst import datamodels
 
 from jwst.stpipe import Step
 from jwst.wfss_contam import wfss_contam
+from jwst.wfss_geom.wfss_geom_step import WfssGeomStep
 
 __all__ = ["WfssContamStep"]
 
@@ -62,6 +63,17 @@ class WfssContamStep(Step):
 
         output_model = self.prepare_output(input_data, open_as_type=datamodels.MultiSlitModel)
 
+        pdt = WfssGeomStep.call(
+            output_model,
+            maximum_cores=self.maximum_cores,
+            orders=self.orders,
+            magnitude_limit=self.magnitude_limit,
+            wl_oversample=self.wl_oversample,
+            max_pixels_per_chunk=self.max_pixels_per_chunk,
+            pdt_spacing=self.pdt_spacing,
+            pdt_wl_oversample=self.pdt_wl_oversample,
+        )
+
         # Get the wavelengthrange ref file
         waverange_ref = self.get_reference_file(output_model, "wavelengthrange")
         log.info(f"Using WAVELENGTHRANGE reference file {waverange_ref}")
@@ -70,28 +82,19 @@ class WfssContamStep(Step):
         photom_ref = self.get_reference_file(output_model, "photom")
         log.info(f"Using PHOTOM reference file {photom_ref}")
 
-        # Get requested orders
-        orders = [int(o) for o in self.orders] if self.orders else None
-
         with (
             datamodels.WavelengthrangeModel(waverange_ref) as waverange_model,
             datamodels.open(photom_ref) as photom_model,
         ):
             result, simul = wfss_contam.contam_corr(
                 output_model,
+                pdt,
                 waverange_model,
                 photom_model,
-                self.maximum_cores,
-                orders=orders,
-                magnitude_limit=self.magnitude_limit,
-                oversample_factor=self.wl_oversample,
-                max_pixels_per_chunk=self.max_pixels_per_chunk,
                 polyfit_degree=self.polyfit_degree,
                 n_iterations=self.n_iterations,
                 l2_alpha=self.l2_alpha,
                 rejection_threshold=self.rejection_threshold,
-                pdt_spacing=self.pdt_spacing,
-                pdt_wl_oversample=self.pdt_wl_oversample,
             )
         if simul is None:
             # Input model is returned as result, no intermediate models created

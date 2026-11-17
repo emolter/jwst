@@ -17,7 +17,6 @@ class WfssGeomStep(Step):
 
     spec = """
         maximum_cores = string(default='1')
-        skip = boolean(default=False)
         orders = list(default=None)  # Spectral orders to process, e.g. 1, or 1,2,3
         magnitude_limit = float(default=None) # Isophotal AB magnitude limit for sources to be included in the contamination correction
         wl_oversample = integer(default=2) # oversampling factor for wavelength grid
@@ -48,12 +47,16 @@ class WfssGeomStep(Step):
         waverange_ref = self.get_reference_file(output_model, "wavelengthrange")
         log.info(f"Using WAVELENGTHRANGE reference file {waverange_ref}")
 
+        # get the photom reference file
+        photom_ref = self.get_reference_file(output_model, "photom")
+        log.info(f"Using PHOTOM reference file {photom_ref}")
+
         # Get requested orders
         orders = [int(o) for o in self.orders] if self.orders else None
 
         with (
             datamodels.WavelengthrangeModel(waverange_ref) as waverange_model,
-            datamodels.open(self.get_reference_file(output_model, "photom")) as photom_model,
+            datamodels.open(photom_ref) as photom_model,
         ):
             pdt = wfss_geom.disperse_all(
                 output_model,
@@ -72,4 +75,4 @@ class WfssGeomStep(Step):
             output_model.meta.cal_step.wfss_geom = "COMPLETE"
         else:
             output_model.meta.cal_step.wfss_geom = "SKIPPED"
-        return output_model, pdt
+        return pdt

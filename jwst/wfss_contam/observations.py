@@ -1,7 +1,5 @@
 import dataclasses
 import logging
-import multiprocessing as mp
-import time
 import warnings
 
 import numpy as np
@@ -9,12 +7,7 @@ from astropy.stats import SigmaClip
 from astropy.utils.exceptions import AstropyUserWarning
 from photutils.background import Background2D, MedianBackground
 
-from jwst.wfss_contam.disperse import disperse
-from jwst.wfss_contam.trace_pdt import (
-    build_trace_pdt,
-    get_grism_detector_transform,
-    native_wavelength_grid,
-)
+from jwst.wfss_contam.contam_model import contam_model
 
 log = logging.getLogger(__name__)
 
@@ -95,39 +88,6 @@ def background_subtract(
         return data - bkg.background
 
 
-def _select_ids(source_id, all_ids):
-    """
-    Select the source IDs to be processed based on the input ID parameter.
-
-    Parameters
-    ----------
-    source_id : int or list-like
-        ID(s) of source to process. If None, all sources processed.
-    all_ids : ndarray
-        Array of all source IDs in the segmentation map
-
-    Returns
-    -------
-    selected_IDs : list
-        List of selected source IDs
-    """
-    if source_id is None:
-        log.info(f"Loading all {len(all_ids)} sources from segmentation map")
-        return all_ids
-
-    elif isinstance(source_id, int):
-        log.info(f"Loading single source {source_id} from segmentation map")
-        return [source_id]
-
-    elif isinstance(source_id, list) or isinstance(source_id, np.ndarray):
-        log.info(
-            f"Loading {len(source_id)} of {len(all_ids)} selected sources from segmentation map"
-        )
-        return list(source_id)
-    else:
-        raise ValueError("ID must be an integer or a list of integers")
-
-
 class Observation:
     """
     Define an observation leading to a single grism image.
@@ -143,13 +103,8 @@ class Observation:
     def __init__(
         self,
         direct_image,
-        segmentation_map,
-        grism_wcs,
-        direct_image_wcs,
+        pdt,
         boundaries=None,
-        max_cpu=1,
-        max_pixels_per_chunk=5e4,
-        oversample_factor=2,
         band_wavelengths=None,
     ):
         """
@@ -160,37 +115,17 @@ class Observation:
         direct_image : np.ndarray
             Direct imaging data.  May be 2-D ``(ny, nx)`` for a single-band
             direct image, or 3-D ``(N, ny, nx)`` for a multi-band cube.
-        segmentation_map : np.ndarray
-            Segmentation map data.
-        grism_wcs : `~gwcs.wcs.WCS`
-            WCS object from grism image
-        direct_image_wcs : `~gwcs.wcs.WCS`
-            WCS object from direct image
+        pdt : dict
+            Table
         boundaries : list, optional
             Start/Stop coordinates of the FOV within the larger seed image.
-        max_cpu : int, optional
-            Max number of cpu's to use when multiprocessing
-        max_pixels_per_chunk : int, optional
-            Maximum number of pixels per chunk when dispersing sources
-        oversample_factor : int, optional
-            Factor by which to oversample the wavelength grid
         band_wavelengths : array-like of shape (N,), optional
             Central wavelengths (in microns) for each plane of a 3-D ``direct_image``.
             Required when ``direct_image`` is 3-D; ignored when ``direct_image`` is 2-D.
         """
+        self.pdt = pdt
         if boundaries is None:
             boundaries = []
-        # Load all the info for this grism mode
-        self.direct_image_wcs = direct_image_wcs
-        self.grism_wcs = grism_wcs
-        self.seg = segmentation_map
-        all_ids = list(set(np.ravel(self.seg)))
-        all_ids.remove(0)  # Remove the background ID
-        self.source_ids = all_ids
-        self.max_cpu = max_cpu
-        self.max_pixels_per_chunk = max_pixels_per_chunk
-        self.oversample_factor = oversample_factor
-
         if direct_image.ndim == 2:
             # use placeholder value since disperse() is going to see a flat SED and ignore this
             self.band_wavelengths = np.array([1.0])
@@ -206,152 +141,27 @@ class Observation:
         # Set the limits of the dispersed image to be simulated
         if len(boundaries) == 0:
             log.debug("No boundaries passed.")
-            self.xstart = 0
-            self.xend = self.xstart + self.seg.shape[0] - 1
-            self.ystart = 0
-            self.yend = self.ystart + self.seg.shape[1] - 1
+            xstart = 0
+            xend = xstart + self.dimage.shape[-2] - 1
+            ystart = 0
+            yend = ystart + self.dimage.shape[-1] - 1
         else:
-            self.xstart, self.xend, self.ystart, self.yend = boundaries
-        self.dims = (self.yend - self.ystart + 1, self.xend - self.xstart + 1)
-        log.debug(f"Using simulated image size of ({self.dims[1]}, {self.dims[0]}).")
-        self.naxis = self.dims[::-1]
-
-        # Create lists of pixels labeled in segmentation map
-        self._create_pixel_list()
+            xstart, xend, ystart, yend = boundaries
+        dims = (yend - ystart + 1, xend - xstart + 1)
+        log.debug(f"Using simulated image size of ({dims[1]}, {dims[0]}).")
 
         # Initialize the output list of cutouts
         self.simulated_cutouts = []
 
         # Initialize the simulated dispersed image
-        self.simulated_image = np.zeros(self.dims, float)
+        self.simulated_image = np.zeros(dims, float)
 
-    def _create_pixel_list(self):
-        """Create flat lists of pixels to be dispersed."""
-        self.ys, self.xs = np.nonzero(self.seg)
-        self.source_ids_per_pixel = self.seg[self.ys, self.xs]
-        if self.dimage.ndim == 2:
-            # Give it an extra dimension to make it shape (1, n_pixels)
-            self.fluxes = self.dimage[self.ys, self.xs][np.newaxis, :]
-        else:
-            # Shape (N, n_pixels), where N is the number of input direct image bands
-            self.fluxes = self.dimage[:, self.ys, self.xs]
-
-    def chunk_sources(
+    def simulate_order(
         self,
         order,
-        lambdas,
         sens_waves,
         sens_response,
-        selected_ids=None,
-        max_pixels=1e5,
         basis_models=None,
-        trace_pdt=None,
-    ):
-        """
-        Chunk the sources into groups of max_pixels.
-
-        Parameters
-        ----------
-        order : int
-            Spectral order to process
-        lambdas : ndarray
-            Wavelengths at which to compute dispersed pixel values for this order,
-            precomputed once per order.
-        sens_waves : ndarray
-            Wavelength array from photom reference file
-        sens_response : ndarray
-            Response (flux calibration) array from photom reference file
-        selected_ids : list, optional
-            List of source IDs to process. If None, all sources are processed.
-        max_pixels : int, optional
-            Maximum number of pixels per chunk.
-        basis_models : list of callables, optional
-            Flux distributions to evaluate at each wavelength. Typically these will be
-            Legendre polynomials from 1st order up to a given max order, e.g.
-            [P1(x), P2(x), ...], the coefficients of which are linearly fit later.
-            If None, no models are included in the output.
-        trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
-            Precomputed pixel dispersion table for this spectral order.
-            If None, no lookup table is used.
-
-        Returns
-        -------
-        disperse_args : list[list]
-            Outer list has length number of groups, and each inner list contains
-            the arguments to disperse() for that group
-            in the format that multiprocessing starmap expects.
-        """
-        source_ids = _select_ids(selected_ids, self.source_ids)
-        max_pixels = int(max_pixels)
-
-        # Create a mask for selected sources
-        selected_mask = np.isin(self.source_ids_per_pixel, source_ids)
-
-        # Get pixels for selected sources
-        selected_xs = self.xs[selected_mask]
-        selected_ys = self.ys[selected_mask]
-        selected_fluxes = self.fluxes[:, selected_mask]
-        selected_source_ids = self.source_ids_per_pixel[selected_mask]
-
-        # Sort by source ID to keep sources mostly together
-        # This reduces the number of times we have to call build_dispersed_image_of_source
-        # within disperse()
-        sort_indices = np.argsort(selected_source_ids)
-        sorted_xs = selected_xs[sort_indices]
-        sorted_ys = selected_ys[sort_indices]
-        sorted_fluxes = selected_fluxes[:, sort_indices]
-        sorted_source_ids = selected_source_ids[sort_indices]
-
-        # Split into chunks of max_pixels
-        total_pixels = len(sorted_xs)
-        n_chunks = int(np.ceil(total_pixels / max_pixels))
-
-        log.info(
-            f"Splitting {total_pixels} pixels from {len(source_ids)} sources into {n_chunks} chunks"
-        )
-
-        disperse_args = []
-        for i in range(n_chunks):
-            start_idx = i * max_pixels
-            end_idx = min((i + 1) * max_pixels, total_pixels)
-
-            chunk_xs = sorted_xs[start_idx:end_idx]
-            chunk_ys = sorted_ys[start_idx:end_idx]
-            chunk_fluxes = sorted_fluxes[:, start_idx:end_idx]
-            chunk_source_ids = sorted_source_ids[start_idx:end_idx]
-
-            disperse_args.append(
-                [
-                    chunk_xs,
-                    chunk_ys,
-                    chunk_fluxes,
-                    self.band_wavelengths,
-                    chunk_source_ids,
-                    order,
-                    lambdas,
-                    sens_waves,
-                    sens_response,
-                    self.direct_image_wcs,
-                    self.grism_wcs,
-                    self.naxis,
-                    basis_models,
-                    trace_pdt,
-                ]
-            )
-
-        return disperse_args
-
-    def disperse_order(
-        self,
-        order,
-        wmin,
-        wmax,
-        sens_waves,
-        sens_response,
-        selected_ids=None,
-        basis_models=None,
-        pdt_spacing=None,
-        pdt_wl_oversample=1,
     ):
         """
         Disperse the sources for a given spectral order, with multiprocessing.
@@ -361,128 +171,25 @@ class Observation:
         Parameters
         ----------
         order : int
-            Spectral order to process
-        wmin : float
-            Minimum wavelength for dispersed spectra
-        wmax : float
-            Maximum wavelength for dispersed spectra
+            Spectral order to process.
         sens_waves : ndarray
             Wavelength array from photom reference file
         sens_response : ndarray
             Response (flux calibration) array from photom reference file
-        selected_ids : list, optional
-            List of source IDs to process. If None, all sources are processed.
         basis_models : list of callables, optional
             Flux distributions to evaluate at each wavelength. Typically these will be single
             polynomial orders, e.g. [lambda x: x, lambda x: x^2], ...] the coefficients of which
             are linearly fit later. If None, no models are included in the output.
-        pdt_spacing : int, optional
-            Spacing of grid points to sample along the x and y axes
-            when building a cached lookup table for the trace-shape transform. If None
-            (the default), no lookup table is used and the exact transform is evaluated directly
-            for every pixel.
-        pdt_wl_oversample : float, optional
-            Oversampling factor for the lookup table's wavelength grid, relative to the
-            native dispersion scale. If None, the lookup table's wavelength grid instead
-            exactly matches the dispersal wavelength grid, allowing
-            `~jwst.wfss_contam.trace_pdt.TracePDT.evaluate_grid` to skip wavelength-axis
-            interpolation entirely. Only used if ``pdt_spacing`` is not None.
         """
-        # Determine the wavelength grid once per order.
-        # native spacing does not vary significantly across the detector, so a single
-        # representative pixel is good enough.
-        imgxy_to_grismxy = get_grism_detector_transform(self.grism_wcs)
-        nx, ny = self.naxis
-        lambdas = native_wavelength_grid(
-            imgxy_to_grismxy,
-            order,
-            wmin,
-            wmax,
-            (nx - 1) / 2.0,
-            (ny - 1) / 2.0,
-            oversample_factor=self.oversample_factor,
-        )
-
-        trace_pdt_obj = None
-        if pdt_spacing is not None:
-            # Determine the spatial bounding box of sources in the WFSS un-dispersed detector frame.
-            # Transform the 4 corners of the direct image / segmentation map into that frame
-            ny_seg, nx_seg = self.seg.shape
-            corners_x = np.array([0.0, nx_seg - 1.0, nx_seg - 1.0, 0.0])
-            corners_y = np.array([0.0, 0.0, ny_seg - 1.0, ny_seg - 1.0])
-            x0_sky, y0_sky = self.direct_image_wcs(corners_x, corners_y, with_bounding_box=False)
-            sky_to_imgxy = self.grism_wcs.get_transform("world", "detector")
-            x0_xy, y0_xy, _, _ = sky_to_imgxy(x0_sky, y0_sky, 1, order)
-            coord_limits = (
-                min(0.0, float(np.floor(np.min(x0_xy)))),
-                max(float(self.naxis[0] - 1), float(np.ceil(np.max(x0_xy)))),
-                min(0.0, float(np.floor(np.min(y0_xy)))),
-                max(float(self.naxis[1] - 1), float(np.ceil(np.max(y0_xy)))),
-            )
-
-            if pdt_wl_oversample is None:
-                trace_pdt_obj = build_trace_pdt(
-                    self.grism_wcs,
-                    order,
-                    wmin,
-                    wmax,
-                    coord_limits,
-                    spacing=pdt_spacing,
-                    lam_grid=lambdas,
-                )
-            else:
-                trace_pdt_obj = build_trace_pdt(
-                    self.grism_wcs,
-                    order,
-                    wmin,
-                    wmax,
-                    coord_limits,
-                    spacing=pdt_spacing,
-                    wave_oversample_factor=pdt_wl_oversample,
-                )
-
-        # generate lists of input parameters for the disperse function
-        # for each chunk of sources
-        disperse_args = self.chunk_sources(
-            order,
-            lambdas,
+        pdt_order = self.pdt[order]
+        source_results = contam_model(
+            pdt_order,
+            self.dimage,
+            self.band_wavelengths,
             sens_waves,
             sens_response,
-            selected_ids=selected_ids,
-            max_pixels=self.max_pixels_per_chunk,
             basis_models=basis_models,
-            trace_pdt=trace_pdt_obj,
         )
-        t0 = time.time()
-        if self.max_cpu > 1:
-            # Use multiprocessing to disperse the sources
-            log.info(
-                f"Using {self.max_cpu} CPU cores for multiprocessing "
-                f"{len(self.source_ids)} sources in {len(disperse_args)} chunks."
-            )
-            ctx = mp.get_context("spawn")
-            pool = ctx.Pool(self.max_cpu)
-            try:
-                all_res = pool.starmap(disperse, disperse_args)
-            except Exception as e:
-                log.error(f"Error during parallel processing: {e}")
-                raise
-            finally:
-                pool.close()
-                pool.join()
-        else:
-            all_res = [disperse(*args) for args in disperse_args]
-        t1 = time.time()
-        log.info(f"Wall clock time for disperse_chunk order {order}: {(t1 - t0):.1f} sec")
-
-        # Combine results from all chunks, aggregating by source ID
-        source_results = {}
-        for results in all_res:
-            if results is None:
-                # None of the sources in this chunk for this order had pixels on the detector
-                continue
-            for sid in results:
-                _aggregate_by_source(results, sid, source_results)
 
         # Now add the combined results to the simulation
         for sid in source_results:
@@ -496,73 +203,6 @@ class Observation:
                 setattr(slitmodel, f"fluxmodel_{i + 1}", fm)
             self.simulated_image[bounds[2] : bounds[3] + 1, bounds[0] : bounds[1] + 1] += img
             self.simulated_cutouts.append(slitmodel)
-
-
-def _aggregate_by_source(results, sid, source_results):
-    """
-    Combine results from different chunks into a single image and bounds for each source ID.
-
-    Parameters
-    ----------
-    results : dict
-        Dictionary containing the results for each source ID in the current chunk, in the format:
-        {source_id: {"bounds": [xmin, xmax, ymin, ymax], "image": 2D array,
-        "model_counts": list of 2D arrays}}
-    sid : int
-        Source ID
-    source_results : dict
-        Dictionary to store simulated image and bounds for each source ID,
-        in the same format as results but with images and bounds aggregated.
-        Updated in place.
-    """
-    if sid not in source_results:
-        source_results[sid] = {
-            "bounds": results[sid]["bounds"],
-            "image": results[sid]["image"],
-            "model_counts": results[sid].get("model_counts", []),
-        }
-        return
-
-    # Combine bounds
-    old_bounds = source_results[sid]["bounds"]
-    new_bounds = results[sid]["bounds"]
-    combined_bounds = [
-        min(old_bounds[0], new_bounds[0]),
-        max(old_bounds[1], new_bounds[1]),
-        min(old_bounds[2], new_bounds[2]),
-        max(old_bounds[3], new_bounds[3]),
-    ]
-
-    combined_shape = (
-        combined_bounds[3] - combined_bounds[2] + 1,
-        combined_bounds[1] - combined_bounds[0] + 1,
-    )
-
-    # Helper to place an existing sub-image into the combined image
-    def _place(old_arr, old_b):
-        out = np.zeros(combined_shape, dtype=float)
-        y0 = old_b[2] - combined_bounds[2]
-        x0 = old_b[0] - combined_bounds[0]
-        out[y0 : y0 + old_arr.shape[0], x0 : x0 + old_arr.shape[1]] = old_arr
-        return out
-
-    old_img = _place(source_results[sid]["image"], old_bounds)
-    new_img = _place(results[sid]["image"], new_bounds)
-    combined_image = old_img + new_img
-
-    # Sum model_counts across chunks (same as image)
-    old_mcs = source_results[sid].get("model_counts", [])
-    new_mcs = results[sid].get("model_counts", [])
-    combined_mcs = [
-        _place(old_mc, old_bounds) + _place(new_mc, new_bounds)
-        for old_mc, new_mc in zip(old_mcs, new_mcs, strict=True)
-    ]
-
-    source_results[sid] = {
-        "bounds": combined_bounds,
-        "image": combined_image,
-        "model_counts": combined_mcs,
-    }
 
 
 def _construct_simulated_cutout(

@@ -1,68 +1,14 @@
 import logging
-import multiprocessing as mp
-import warnings
 
 import numpy as np
-from astropy.modeling.mappings import Mapping
 from scipy.interpolate import interp1d
 
-from jwst.lib.winclip import get_clipped_pixels
 from jwst.wfss_contam.sens1d import create_1d_sens
 
 log = logging.getLogger(__name__)
 
 
-__all__ = ["disperse"]
-
-
-def _disperse_onto_grism(
-    x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas, order, trace_pdt=None
-):
-    """
-    Compute x/y positions in the grism image for the set of desired wavelengths.
-
-    Parameters
-    ----------
-    x0_sky : ndarray
-        RA of the input pixel position in direct image and segmentation map
-    y0_sky : ndarray
-        Dec of the input pixel position in direct image and segmentation map
-    sky_to_imgxy : astropy model
-        Transform from sky to image coordinates
-    imgxy_to_grismxy : astropy model
-        Transform from image to grism coordinates
-    lambdas : ndarray
-        Wavelengths at which to compute dispersed pixel values
-    order : int
-        Spectral order number
-    trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
-        If provided, used in place of ``imgxy_to_grismxy`` to approximate the
-        dispersed pixel positions via a cached, precomputed grid.
-
-    Returns
-    -------
-    x0s : ndarray
-        X coordinates of dispersed pixels in the grism image
-    y0s : ndarray
-        Y coordinates of dispersed pixels in the grism image
-    lambdas : ndarray
-        Wavelengths corresponding to each dispersed pixel
-    """
-    # Evaluate sky-to-direct transform once on the unique per-pixel positions
-    x0_xy, y0_xy, _, _ = sky_to_imgxy(x0_sky, y0_sky, 1, order)
-    n_pixels = len(x0_xy)
-
-    if trace_pdt is not None:
-        x0s, y0s = trace_pdt.evaluate_grid(x0_xy, y0_xy, lambdas)
-        lambdas = np.repeat(lambdas[:, np.newaxis], n_pixels, axis=1)
-    else:
-        n_lam = len(lambdas)
-        x0_xy = np.repeat(x0_xy[np.newaxis, :], n_lam, axis=0)
-        y0_xy = np.repeat(y0_xy[np.newaxis, :], n_lam, axis=0)
-        lambdas = np.repeat(lambdas[:, np.newaxis], n_pixels, axis=1)
-        x0s, y0s = imgxy_to_grismxy(x0_xy, y0_xy, lambdas, order)
-    # x0s, y0s now have shape (n_lam, n_pixels)
-    return x0s, y0s, lambdas
+__all__ = ["contam_model"]
 
 
 def _collect_outputs_by_source(xs, ys, counts, source_ids_per_pixel, model_counts=None):
@@ -255,67 +201,40 @@ def _replace_nans(fluxes):
     return fluxes
 
 
-def disperse(
-    xs,
-    ys,
+def contam_model(
+    pdt,
     fluxes,
     band_wavelengths,
-    source_ids_per_pixel,
-    order,
-    lambdas,
     sens_waves,
     sens_resp,
-    direct_image_wcs,
-    grism_wcs,
-    naxis,
     basis_models=None,
-    trace_pdt=None,
 ):
     """
     Compute the dispersed image pixel values from the direct image.
 
     Parameters
     ----------
-    xs : ndarray
-        Flat array of X coordinates of pixels in the direct image
-    ys : ndarray
-        Flat array of Y coordinates of pixels in the direct image
-    fluxes : ndarray of shape (N, n_pixels)
-        Fluxes of the pixels in the direct image corresponding to xs, ys,
-        in units of MJy/sr.  N is the number of photometric bands; use N=1
-        for a flat (wavelength-independent) SED. Note in that case the array must still be 2-D.
+    pdt : dict
+        Pre-computed table storing mapping between direct image pixels and
+        corresponding dispersed position, wavelength, and fractional area.
+    fluxes : ndarray
+        Direct image fluxes in MJy/sr, with shape (ny, nx) for a flat SED
+        or (N, ny, nx) for N photometric bands.
     band_wavelengths : ndarray
         Central wavelengths (in microns) of each photometric band in
         ``fluxes`` (shape (N,)).  Fluxes are linearly interpolated onto the internal
         wavelength grid. Fluxes are held constant (flat extrapolation)
         outside the covered wavelength range. For a flat SED this can be any length-1 array,
         as it is not used with N=1.
-    source_ids_per_pixel : int array
-        Source IDs of the input pixels in the segmentation map
-    order : int
-        Spectral order number
-    lambdas : ndarray
-        Wavelengths at which to compute dispersed pixel values.
     sens_waves : float array
         Wavelength array from photom reference file. Expected unit is micron.
     sens_resp : float array
         Response (flux calibration) array from photom reference file.
         Expected units are (micron) * (MJy / sr) / (ADU/s).
-    direct_image_wcs : WCS object
-        WCS object for the direct image and segmentation map
-    grism_wcs : WCS object
-        WCS object for the grism image
-    naxis : tuple
-        Dimensions of the grism image (naxis[0], naxis[1])
     basis_models : list[Callable], optional
         Flux distributions to evaluate at each wavelength. Typically these will be single
         polynomial orders, e.g. [lambda x: x, lambda x: x^2], ...] the coefficients of which
         are linearly fit later.
-    trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
-        If provided, used in place of the exact "detector" to "grism_detector" transform
-        to approximate the dispersed pixel positions via a cached, precomputed grid.
-        This substantially speeds up dispersion at the cost of a small amount of accuracy.
-        If None (the default), the exact transform is evaluated for every pixel.
 
     Returns
     -------
@@ -323,44 +242,19 @@ def disperse(
         Dictionary containing dispersed images and bounds for each source ID
         in the specified spectral order.
     """
-    n_input_sources = np.unique(source_ids_per_pixel).size
-    log.debug(
-        f"{mp.current_process()} dispersing {n_input_sources} "
-        f"sources in order {order} with total number of pixels: {len(xs)}"
-    )
-    if np.max(source_ids_per_pixel) < np.iinfo(np.uint16).max and np.min(source_ids_per_pixel) >= 0:
-        # Conversion to 16-bit makes the array faster to sort later
-        source_ids_per_pixel = source_ids_per_pixel.astype(np.uint16, copy=False)
-    width = 1.0
-    height = 1.0
-    x0 = xs + 0.5 * width
-    y0 = ys + 0.5 * height
-    del xs, ys
+    wavelength_index = pdt["wavelength_index"]
+    if wavelength_index.size == 0:
+        return {}
 
-    # Set up the transforms we need from the input WCS objects
-    sky_to_imgxy = grism_wcs.get_transform("world", "detector")
-    imgxy_to_grismxy = grism_wcs.get_transform("detector", "grism_detector")
+    input_x, input_y = pdt["input_xy"].T
+    if fluxes.ndim == 2:
+        fluxes = fluxes[np.newaxis, ...]
+    fluxes = fluxes[:, input_y, input_x].copy()
 
-    # We only need the x,y outputs of imgxy_to_grismxy
-    # Making the number of outputs dynamic handles legacy WCS objects that did not pass
-    # the x0, y0, and order through the transform unmodified like the current version does.
-    n_outputs = len(imgxy_to_grismxy.outputs)
-    imgxy_to_grismxy = imgxy_to_grismxy | Mapping((0, 1), n_inputs=n_outputs)
-
-    # Find RA/Dec of the input pixel position in direct image
-    x0_sky, y0_sky = direct_image_wcs(x0, y0, with_bounding_box=False)
-    del x0, y0
-
+    lambdas = pdt["wavelength"]
+    nlam = lambdas.size
     dlam = lambdas[1] - lambdas[0]
-    nlam = len(lambdas)
-    # Keep 1-d versions of lambdas, source_ids_per_pixel around so the gather below
-    # can index based on these smaller arrays instead of the (nlam, n_pixels) broadcasts.
-    n_pixels = len(source_ids_per_pixel)
-    lam_grid = lambdas
-    source_ids_1d = source_ids_per_pixel
-
     # Interpolate the input fluxes onto the wavelength grid of the dispersed image
-    fluxes_1d = None
     if len(band_wavelengths) >= 2:
         # interp1d does not handle NaNs, so replace with interplation that assumes
         # flat spectrum at the edges and linear interpolation in the interior,
@@ -378,54 +272,15 @@ def disperse(
         fluxes = interp_fn(lambdas)  # (nlam, n_pixels)
     else:
         # constant flux across all wavelengths
-        fluxes_1d = fluxes[0]
         fluxes = np.repeat(fluxes[0][np.newaxis, :], nlam, axis=0)
-    source_ids_per_pixel = np.repeat(source_ids_per_pixel[np.newaxis, :], nlam, axis=0)
-
-    x0s, y0s, lambdas = _disperse_onto_grism(
-        x0_sky,
-        y0_sky,
-        sky_to_imgxy,
-        imgxy_to_grismxy,
-        lambdas,
-        order,
-        trace_pdt=trace_pdt,
-    )
-    del x0_sky, y0_sky
-
-    # If none of the dispersed pixel indexes are within the image frame,
-    # return a null result without wasting time doing other computations
-    possible = (x0s > -0.5) & (x0s < naxis[0] + 0.5) & (y0s > -0.5) & (y0s < naxis[1] + 0.5)
-    if not possible.any():
-        return
-
-    # Discretize x and y coordinates to integer pixel values, keeping track of the fractional area
-    # that each pixel contributes to the final grism image.
-    # The resulting x, y coordinate pairs are non-unique: there are multiple wavelengths
-    # that contribute to each pixel.
-    padding = 1
-    xs, ys, areas, index = get_clipped_pixels(x0s, y0s, padding, naxis[0], naxis[1], width, height)
-    del x0s, y0s
-
-    # get_clipped_pixels treats its (nlam, n_pixels) inputs as flattened in C order,
-    # so `index` decomposes into a (wavelength, pixel) pair. Use that to gather
-    # lambdas and source_ids_per_pixel from their small 1-D arrays, which is cheaper to compute
-    # than, e.g., lambdas=np.take(lambdas, index)
-    lam_idx, pixel_idx = np.divmod(index, n_pixels)
-    lambdas = lam_grid[lam_idx]
-    source_ids_per_pixel = source_ids_1d[pixel_idx]
-    # This trick can only be applied to fluxes if they are flat-spectrum
-    fluxes = fluxes_1d[pixel_idx] if fluxes_1d is not None else np.take(fluxes, index)
-
-    # Evaluate basis models on the 1-D lambda array.
-    # even after np.take this is element-wise so this is still full resolution
-    model_f = []
-    if basis_models is not None:
-        for flam in basis_models:
-            model_f.append(flam(lambdas))
 
     # compute 1D sensitivity array corresponding to list of wavelengths
     sens, no_cal = create_1d_sens(lambdas, sens_waves, sens_resp)
+
+    contributions_per_pixel = np.diff(pdt["pixel_idx_ptr"])
+    input_pixel_index = np.repeat(np.arange(len(pdt["input_xy"])), contributions_per_pixel)
+    contribution_flux = fluxes[wavelength_index, input_pixel_index]
+    fractional_area = pdt["fractional_area"]
 
     # Compute countrates for dispersed pixels.
     # The input direct image data is already photometrically calibrated,
@@ -433,33 +288,20 @@ def disperse(
     # Divide out the response values to convert from Mjy/sr to DN/s.
     # Note that the photom reference files are constructed with per-wavelength units,
     # so oversampling is accounted for by the spacing of dlam.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", category=RuntimeWarning, message="divide by zero|invalid value"
-        )
-        counts = fluxes * areas * dlam / sens
-    counts[no_cal] = 0.0  # set to zero where no flux cal info available
+    conversion = np.zeros_like(sens, dtype=float)
+    np.divide(dlam, sens, out=conversion, where=~no_cal)
+    counts = contribution_flux * fractional_area * conversion[wavelength_index]
+    counts[no_cal[wavelength_index]] = 0.0
 
     # Also convert basis models to counts.
     model_counts = []
-    for f in model_f:
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", category=RuntimeWarning, message="divide by zero|invalid value"
-            )
-            model_counts_i = fluxes * f * areas * dlam / sens
-        model_counts_i[no_cal] = 0.0
-        model_counts.append(model_counts_i)
-    del fluxes, areas, sens, dlam, no_cal, lambdas, index
+    if basis_models is not None:
+        for basis_model in basis_models:
+            basis_values = np.broadcast_to(np.asarray(basis_model(lambdas)), lambdas.shape)
+            basis_counts = counts * basis_values[wavelength_index]
+            basis_counts[no_cal[wavelength_index]] = 0.0
+            model_counts.append(basis_counts)
 
-    outputs_by_source = _collect_outputs_by_source(
-        xs, ys, counts, source_ids_per_pixel, model_counts
-    )
-    del xs, ys, counts, source_ids_per_pixel
-    n_out = len(outputs_by_source)
-    log.debug(
-        f"{mp.current_process()} finished order {order} with {n_out} "
-        f"sources that overlap with the output frame "
-        f"(out of {n_input_sources} input sources)"
-    )
-    return outputs_by_source
+    xs, ys = pdt["grism_xy"].T
+    source_ids_per_contribution = pdt["source_id"][input_pixel_index]
+    return _collect_outputs_by_source(xs, ys, counts, source_ids_per_contribution, model_counts)
