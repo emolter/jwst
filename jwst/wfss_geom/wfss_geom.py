@@ -1,7 +1,11 @@
 import logging
 import multiprocessing
+import shutil
+import tempfile
 import time
+from pathlib import Path
 
+import asdf
 import numpy as np
 from stcal.multiprocessing import compute_num_cores
 from stdatamodels.jwst import datamodels
@@ -21,6 +25,69 @@ from jwst.wfss_geom.trace_pdt import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _disperse_to_files(disperse_args, directory, source_parts):
+    """
+    Disperse a single chunk and then write a PDT for each source in the chunk to disk.
+
+    Parameters
+    ----------
+    disperse_args : tuple
+        Arguments to be passed to the `disperse` function.
+    directory : str or Path
+        Directory where the PDT files will be written.
+    source_parts : dict
+        Dictionary mapping source IDs to their part numbers.
+
+    Returns
+    -------
+    files : dict
+        Dictionary mapping source IDs to lists of filenames of the written PDT files.
+    """
+    geometry = disperse(*disperse_args)
+    files = {source_id: [] for source_id in source_parts}
+    if geometry is None:
+        return files
+
+    source_ids, starts, sizes = np.unique(
+        geometry["source_id"], return_index=True, return_counts=True
+    )
+    for source_id, start, size in zip(source_ids, starts, sizes, strict=True):
+        source_id = int(source_id)
+        stop = start + size
+        pointers = geometry["pixel_idx_ptr"][start : stop + 1]
+        first, last = int(pointers[0]), int(pointers[-1])
+        if first == last:
+            continue
+
+        filename = Path(directory) / (
+            f"source_{source_id:06d}_order_{int(disperse_args[3])}_"
+            f"part_{source_parts[source_id]:04d}.asdf"
+        )
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=directory, suffix=".tmp", delete=False) as handle:
+                temporary_path = Path(handle.name)
+                tree = {
+                    "wavelength": disperse_args[4].copy(),
+                    "spectral_order": int(disperse_args[3]),
+                    "input_xy": geometry["input_xy"][start:stop].copy(),
+                    "source_id": geometry["source_id"][start:stop].copy(),
+                    "pixel_idx_ptr": pointers - first,
+                    "grism_xy": geometry["grism_xy"][first:last].copy(),
+                    "wavelength_index": geometry["wavelength_index"][first:last].copy(),
+                    "fractional_area": geometry["fractional_area"][first:last].copy(),
+                }
+                with asdf.AsdfFile(tree) as table:
+                    table.write_to(handle.file)
+            temporary_path.replace(filename)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+        files[source_id].append(str(filename))
+
+    return files
 
 
 def _find_min_relresp(sens_waves, sens_response):
@@ -188,67 +255,44 @@ def _reject_off_detector_bounds(
     return ~bad
 
 
-def _combine_geom_chunks(chunk_results, wavelength):
+def _chunk_bounds_keep_sources_together(sorted_source_ids, max_pixels):
     """
-    Combine geometry tables from individual chunks into a single order-level PDT.
+    Determine chunk boundaries for a sorted list of source IDs.
 
-    Parameters
-    ----------
-    chunk_results : list of dict
-        List of geometry tables from individual chunks.
-    wavelength : ndarray
-        Array of wavelengths corresponding to the geometry tables.
+    Respect a maximum pixel limit, and keep sources together within a single chunk
+    unless they are larger than that limit.
 
     Returns
     -------
-    dict
-        Combined geometry table for the entire order.
+    list
+        List of (start, stop) indices for each chunk.
     """
-    input_xy = []
-    source_ids = []
-    grism_xy = []
-    wavelength_indices = []
-    fractional_areas = []
-    pixel_idx_ptr = [np.array([0], dtype=np.intp)]
-    n_contributions = 0
-
-    for geometry in chunk_results:
-        if geometry is None:
-            continue
-
-        input_xy.append(geometry["input_xy"])
-        source_ids.append(geometry["source_id"])
-        grism_xy.append(geometry["grism_xy"])
-        wavelength_indices.append(geometry["wavelength_index"])
-        fractional_areas.append(geometry["fractional_area"])
-        pixel_idx_ptr.append(geometry["pixel_idx_ptr"][1:] + n_contributions)
-        n_contributions += geometry["pixel_idx_ptr"][-1]
-
-    return {
-        "wavelength": np.asarray(wavelength),
-        "input_xy": np.concatenate(input_xy) if input_xy else np.empty((0, 2), dtype=int),
-        "source_id": np.concatenate(source_ids) if source_ids else np.empty(0, dtype=int),
-        "pixel_idx_ptr": np.concatenate(pixel_idx_ptr),
-        "grism_xy": np.concatenate(grism_xy) if grism_xy else np.empty((0, 2), dtype=int),
-        "wavelength_index": (
-            np.concatenate(wavelength_indices) if wavelength_indices else np.empty(0, dtype=int)
-        ),
-        "fractional_area": (
-            np.concatenate(fractional_areas) if fractional_areas else np.empty(0, dtype=float)
-        ),
-    }
+    _, source_sizes = np.unique(sorted_source_ids, return_counts=True)
+    chunk_bounds = []
+    batch_start = batch_stop = 0
+    for source_size in source_sizes:
+        source_stop = batch_stop + int(source_size)
+        if source_size > max_pixels:
+            while source_stop - batch_start >= max_pixels:
+                chunk_stop = batch_start + max_pixels
+                chunk_bounds.append((batch_start, chunk_stop))
+                batch_start = chunk_stop
+        elif source_stop - batch_start > max_pixels:
+            chunk_bounds.append((batch_start, batch_stop))
+            batch_start = batch_stop
+        batch_stop = source_stop
+    if batch_stop > batch_start:
+        chunk_bounds.append((batch_start, batch_stop))
+    return chunk_bounds
 
 
 class Observation:
     """
     Define an observation leading to a single grism image.
 
-    The Observation class is responsible for calling the various WCS transforms that convert
-    a direct image and a segmentation image into a simulation of the grism image, making
-    assumptions about the spectral properties of the direct image sources.
-    When the `disperse_order` method is called one or more times, two products are created:
-    the simulated dispersed image (``simulated_image`` attribute) and
-    the simulated source cutouts (``simulated_cutouts`` attribute).
+    Compute geometric pixel mappings in bounded, source-aware batches. Each call
+    to `disperse_order` writes standalone source-part ASDF tables and returns a
+    lightweight manifest, without assembling a full order's geometry in memory.
     """
 
     def __init__(
@@ -258,8 +302,9 @@ class Observation:
         direct_image_wcs,
         boundaries=None,
         max_cpu=1,
-        max_pixels_per_chunk=5e4,
+        max_pixels_per_chunk=5000,
         oversample_factor=2,
+        pdt_directory=None,
     ):
         """
         Initialize all data and metadata for a given observation.
@@ -280,6 +325,10 @@ class Observation:
             Maximum number of pixels per chunk when dispersing sources
         oversample_factor : int, optional
             Factor by which to oversample the wavelength grid
+        pdt_directory : str or Path, optional
+            Persistent PDT directory, overwritten with a warning when a new
+            observation first writes to it. If None, a unique directory is used.
+            Files are retained for reuse; the caller owns cleanup.
         """
         if boundaries is None:
             boundaries = []
@@ -287,12 +336,12 @@ class Observation:
         self.direct_image_wcs = direct_image_wcs
         self.grism_wcs = grism_wcs
         self.seg = segmentation_map
-        all_ids = list(set(np.ravel(self.seg)))
-        all_ids.remove(0)  # Remove the background ID
-        self.source_ids = all_ids
+        self.source_ids = np.unique(self.seg[self.seg != 0]).tolist()
         self.max_cpu = max_cpu
         self.max_pixels_per_chunk = max_pixels_per_chunk
         self.oversample_factor = oversample_factor
+        self.pdt_directory = pdt_directory
+        self._pdt_run_directory = None
 
         # Set the limits of the dispersed image to be simulated
         if len(boundaries) == 0:
@@ -316,11 +365,11 @@ class Observation:
         order,
         lambdas,
         selected_ids=None,
-        max_pixels=1e5,
+        max_pixels=5000,
         trace_pdt=None,
     ):
         """
-        Chunk the sources into groups of max_pixels.
+        Pack whole sources into bounded batches, splitting only oversized sources.
 
         Parameters
         ----------
@@ -332,7 +381,10 @@ class Observation:
         selected_ids : list, optional
             List of source IDs to process. If None, all sources are processed.
         max_pixels : int, optional
-            Maximum number of pixels per chunk.
+            Hard maximum number of input pixels per chunk. Small sources are kept
+            whole; only sources whose total size exceeds this limit may be split
+            to fill available batch space. Their final partial batch remains open
+            for subsequent whole sources.
         trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
             Precomputed pixel dispersion table for this spectral order.
             If None, no lookup table is used.
@@ -346,6 +398,8 @@ class Observation:
         """
         source_ids = _select_ids(selected_ids, self.source_ids)
         max_pixels = int(max_pixels)
+        if max_pixels < 1:
+            raise ValueError("max_pixels must be at least 1")
 
         # Create a mask for selected sources
         selected_mask = np.isin(self.source_ids_per_pixel, source_ids)
@@ -356,26 +410,21 @@ class Observation:
         selected_source_ids = self.source_ids_per_pixel[selected_mask]
 
         # Sort by source ID to keep sources mostly together
-        # This reduces the number of times we have to call build_dispersed_image_of_source
-        # within disperse()
-        sort_indices = np.argsort(selected_source_ids)
+        sort_indices = np.argsort(selected_source_ids, kind="stable")
         sorted_xs = selected_xs[sort_indices]
         sorted_ys = selected_ys[sort_indices]
         sorted_source_ids = selected_source_ids[sort_indices]
 
-        # Split into chunks of max_pixels
+        # Build up chunks that respect the max_pixels limit while keeping sources together
         total_pixels = len(sorted_xs)
-        n_chunks = int(np.ceil(total_pixels / max_pixels))
-
+        chunk_bounds = _chunk_bounds_keep_sources_together(sorted_source_ids, max_pixels)
         log.info(
-            f"Splitting {total_pixels} pixels from {len(source_ids)} sources into {n_chunks} chunks"
+            f"Splitting {total_pixels} pixels from {len(source_ids)} sources into "
+            f"{len(chunk_bounds)} chunks"
         )
 
         disperse_args = []
-        for i in range(n_chunks):
-            start_idx = i * max_pixels
-            end_idx = min((i + 1) * max_pixels, total_pixels)
-
+        for start_idx, end_idx in chunk_bounds:
             chunk_xs = sorted_xs[start_idx:end_idx]
             chunk_ys = sorted_ys[start_idx:end_idx]
             chunk_source_ids = sorted_source_ids[start_idx:end_idx]
@@ -408,7 +457,7 @@ class Observation:
         """
         Disperse the sources for a given spectral order, with multiprocessing.
 
-        The ``simulated_cutouts`` and ``simulated_image`` attributes are updated in place.
+        Workers write per-source parts to disk and return filenames only.
 
         Parameters
         ----------
@@ -435,7 +484,9 @@ class Observation:
         Returns
         -------
         dict
-            Combined geometry table for the given spectral order.
+            Manifest containing the wavelength grid, run directory, and source IDs
+            mapped to lists of standalone ASDF filenames. Empty lists indicate no
+            on-detector contributions. Read and process arrays inside an ``asdf.open`` context.
         """
         # Determine the wavelength grid once per order.
         # native spacing does not vary significantly across the detector, so a single
@@ -499,29 +550,64 @@ class Observation:
             max_pixels=self.max_pixels_per_chunk,
             trace_pdt=trace_pdt_obj,
         )
+        if self._pdt_run_directory is None:
+            if self.pdt_directory is None:
+                self._pdt_run_directory = tempfile.mkdtemp(prefix="wfss_pdt_", dir=Path.cwd())
+            else:
+                requested_directory = Path(self.pdt_directory).absolute()
+                directory = requested_directory.resolve()
+                if requested_directory.is_symlink():
+                    raise ValueError("PDT directory must not be a symbolic link")
+                if (
+                    directory == Path.home()
+                    or directory == Path.cwd()
+                    or directory in Path.cwd().parents
+                ):
+                    raise ValueError("PDT directory must be a dedicated output directory")
+                if directory.exists():
+                    log.warning("Overwriting existing PDT directory: %s", directory)
+                    shutil.rmtree(directory)
+                directory.mkdir(parents=True)
+                self._pdt_run_directory = str(directory)
+            log.info("Writing persistent PDT files to %s", self._pdt_run_directory)
+        directory = Path(self._pdt_run_directory) / f"order_{int(order)}"
+        directory.mkdir(exist_ok=True)
+        if any(directory.iterdir()):
+            raise FileExistsError(f"PDT order directory is not empty: {directory}")
+
+        source_parts = {}
+        tasks = []
+        for args in disperse_args:
+            parts = {}
+            for source_id in np.unique(args[2]):
+                source_id = int(source_id)
+                parts[source_id] = source_parts.get(source_id, 0)
+                source_parts[source_id] = parts[source_id] + 1
+            tasks.append((args, str(directory), parts))
+        manifest = {
+            "wavelength": lambdas,
+            "directory": self._pdt_run_directory,
+            "sources": {source_id: [] for source_id in source_parts},
+        }
         t0 = time.time()
-        if self.max_cpu > 1:
+        if self.max_cpu > 1 and tasks:
             # Use multiprocessing to disperse the sources
             log.info(
                 f"Using {self.max_cpu} CPU cores for multiprocessing "
                 f"{len(self.source_ids)} sources in {len(disperse_args)} chunks."
             )
             ctx = multiprocessing.get_context("spawn")
-            pool = ctx.Pool(self.max_cpu)
-            try:
-                all_res = pool.starmap(disperse, disperse_args)
-            except Exception as e:
-                log.error(f"Error during parallel processing: {e}")
-                raise
-            finally:
-                pool.close()
-                pool.join()
+            with ctx.Pool(min(self.max_cpu, len(tasks))) as pool:
+                all_res = pool.starmap(_disperse_to_files, tasks, chunksize=1)
         else:
-            all_res = [disperse(*args) for args in disperse_args]
+            all_res = [_disperse_to_files(*task) for task in tasks]
+        for result in all_res:
+            for source_id, filenames in result.items():
+                manifest["sources"][source_id].extend(filenames)
         t1 = time.time()
         log.info(f"Wall clock time for disperse_chunk order {order}: {(t1 - t0):.1f} sec")
 
-        return _combine_geom_chunks(all_res, lambdas)
+        return manifest
 
 
 def disperse_all(
@@ -529,9 +615,10 @@ def disperse_all(
     waverange,
     photom,
     max_cores,
+    pdt_directory,
     orders=None,
     magnitude_limit=None,
-    max_pixels_per_chunk=5e4,
+    max_pixels_per_chunk=5000,
     oversample_factor=2,
     pdt_spacing=None,
     pdt_wl_oversample=1,
@@ -557,6 +644,10 @@ def disperse_all(
         the fraction of cores to use for multi-proc. The total number of
         cores includes the SMT cores (Hyper Threading for Intel).
         If an integer is provided, it will be the exact number of cores used.
+    pdt_directory : str or Path
+        Persistent PDT directory. Defaults to the input filename root followed by
+        ``_pdt`` in the current directory. Existing directories are overwritten
+        with a warning. The caller owns cleanup of the output directory.
     orders : list, optional
         List of spectral orders to process.
         If None, all orders defined in the wavelengthrange file will be processed.
@@ -583,10 +674,14 @@ def disperse_all(
 
     Returns
     -------
-    input_model : `~stdatamodels.jwst.datamodels.DataModel`
-        The input data model, potentially updated with contamination information.
     geometry : dict or None
-        The pixel dispersion table geometry, or None if no valid spectral orders were found.
+        Integer spectral orders mapped to manifests with ``wavelength``,
+        ``directory``, and ``sources`` keys. Each source ID maps to ordered
+        source-part ASDF filenames. Files include the wavelength grid and local
+        pixel pointers, and can be read independently using ``asdf.open``.
+        Process lazily loaded arrays before closing the file.
+        The caller owns cleanup of the persistent run
+        directory. Returns None if no orders or sources were selected.
     """
     max_available_cores = multiprocessing.cpu_count()
     # don't worry about case where nchunks < ncpus; just set nchunks large for now
@@ -614,7 +709,7 @@ def disperse_all(
     spec_orders = validate_orders_against_transform(grism_wcs, spec_orders)
     if len(spec_orders) == 0:
         log.error("No valid spectral orders found. Step will be SKIPPED.")
-        return input_model, None
+        return None
     log.info(f"Spectral orders requested = {[int(x) for x in spec_orders]}")
 
     # Get the FILTER and PUPIL wheel positions, for use later
@@ -654,6 +749,7 @@ def disperse_all(
             max_cpu=ncpus,
             max_pixels_per_chunk=max_pixels_per_chunk,
             oversample_factor=oversample_factor,
+            pdt_directory=pdt_directory,
         )
 
     no_sources = True

@@ -1,7 +1,212 @@
-import numpy as np
+from contextlib import nullcontext
+from pathlib import Path
 
-from jwst.wfss_geom import disperse
-from jwst.wfss_geom.wfss_geom import _combine_geom_chunks
+import asdf
+import numpy as np
+import pytest
+from astropy.modeling.models import Identity, Mapping
+
+from jwst.wfss_geom import disperse, wfss_geom
+from jwst.wfss_geom.wfss_geom import Observation
+from jwst.wfss_geom.wfss_geom_step import _default_pdt_directory
+
+
+class GeometryTestWCS:
+    def get_transform(self, from_frame, to_frame):
+        if from_frame == "world":
+            return Identity(4)
+        return Mapping((0, 1), n_inputs=4)
+
+
+def make_observation(tmp_path, max_cpu=1):
+    segmentation = np.array([[1, 1, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 0]])
+    return Observation(
+        segmentation,
+        GeometryTestWCS(),
+        Identity(2),
+        boundaries=[0, 29, 0, 9],
+        max_cpu=max_cpu,
+        max_pixels_per_chunk=5,
+        pdt_directory=tmp_path / "test_pdt",
+    )
+
+
+def test_source_aware_chunks(tmp_path):
+    observation = make_observation(tmp_path)
+    chunks = observation.chunk_sources(1, np.array([1.0, 2.0]), max_pixels=5)
+
+    assert [len(args[0]) for args in chunks] == [5, 5, 3]
+    assert [np.unique(args[2]).tolist() for args in chunks] == [[1, 2, 3], [3], [3, 4]]
+    np.testing.assert_array_equal(np.concatenate([args[0] for args in chunks]), np.arange(13))
+    with pytest.raises(ValueError, match="at least 1"):
+        observation.chunk_sources(1, np.array([1.0, 2.0]), max_pixels=0)
+    assert observation.chunk_sources(1, np.array([1.0, 2.0]), selected_ids=[], max_pixels=5) == []
+
+
+@pytest.mark.parametrize(
+    "source_sizes, expected_sizes",
+    [
+        ([30, 6000, 40, 100], [5000, 1170]),
+        ([30, 5000], [30, 5000]),
+        ([3000, 3000], [3000, 3000]),
+        ([5000, 1], [5000, 1]),
+        ([30, 10000, 40], [5000, 5000, 70]),
+    ],
+)
+def test_only_oversized_sources_can_be_split(tmp_path, source_sizes, expected_sizes):
+    labels = np.repeat(np.arange(1, len(source_sizes) + 1), source_sizes)
+    segmentation = np.append(labels, 0)[np.newaxis, :]
+    observation = Observation(segmentation, GeometryTestWCS(), Identity(2))
+    chunks = observation.chunk_sources(1, np.array([1.0, 2.0]), max_pixels=5000)
+
+    assert [len(args[0]) for args in chunks] == expected_sizes
+    assert all(len(args[0]) <= 5000 for args in chunks)
+    np.testing.assert_array_equal(
+        np.concatenate([args[0] for args in chunks]), np.arange(len(labels))
+    )
+    np.testing.assert_array_equal(np.concatenate([args[2] for args in chunks]), labels)
+    for source_id, source_size in enumerate(source_sizes, start=1):
+        appearances = sum(np.any(args[2] == source_id) for args in chunks)
+        if source_size <= 5000:
+            assert appearances == 1
+        else:
+            assert appearances > 1
+
+
+@pytest.mark.parametrize("max_cpu", [1, 2])
+def test_file_backed_source_manifest(tmp_path, monkeypatch, max_cpu):
+    observation = make_observation(tmp_path, max_cpu=max_cpu)
+    wavelength = np.array([1.0, 2.0])
+    monkeypatch.setattr(wfss_geom, "native_wavelength_grid", lambda *args, **kwargs: wavelength)
+
+    for order in [1, -1]:
+        manifest = observation.disperse_order(order, 1.0, 2.0)
+        np.testing.assert_array_equal(manifest["wavelength"], wavelength)
+        assert set(manifest["sources"]) == {1, 2, 3, 4}
+        assert [len(parts) for parts in manifest["sources"].values()] == [1, 1, 3, 1]
+        for source_id, filenames in manifest["sources"].items():
+            input_pixels = []
+            for part, filename in enumerate(filenames):
+                assert f"source_{source_id:06d}_order_{order}_part_{part:04d}.asdf" in filename
+                with asdf.open(filename) as file:
+                    table = file.tree
+                    np.testing.assert_array_equal(table["wavelength"], wavelength)
+                    assert table["spectral_order"] == order
+                    assert np.all(table["source_id"] == source_id)
+                    assert 0 < len(table["input_xy"]) <= 5
+                    assert table["pixel_idx_ptr"][0] == 0
+                    assert table["pixel_idx_ptr"][-1] == len(table["fractional_area"])
+                    assert len(table["pixel_idx_ptr"]) == len(table["input_xy"]) + 1
+                    assert len(table["grism_xy"]) == len(table["wavelength_index"])
+                    assert np.all(np.diff(table["pixel_idx_ptr"]) >= 0)
+                    input_pixels.extend(table["input_xy"][:, 0])
+                    expected = disperse.disperse(
+                        table["input_xy"][:, 0],
+                        table["input_xy"][:, 1],
+                        table["source_id"],
+                        order,
+                        wavelength,
+                        observation.direct_image_wcs,
+                        observation.grism_wcs,
+                        observation.naxis,
+                    )
+                    for key, values in expected.items():
+                        np.testing.assert_array_equal(table[key], values)
+            np.testing.assert_array_equal(
+                input_pixels, np.where(observation.seg[0] == source_id)[0]
+            )
+
+    assert not list(tmp_path.rglob("*.tmp"))
+    with pytest.raises(FileExistsError, match="not empty"):
+        observation.disperse_order(1, 1.0, 2.0)
+
+
+def test_file_manifest_no_contributions(tmp_path, monkeypatch):
+    observation = make_observation(tmp_path)
+    observation.naxis = (1, 1)
+    wavelength = np.array([1.0, 2.0])
+    monkeypatch.setattr(wfss_geom, "native_wavelength_grid", lambda *args, **kwargs: wavelength)
+    manifest = observation.disperse_order(1, 1.0, 2.0, selected_ids=[3])
+
+    assert manifest["sources"] == {3: []}
+    assert not list(tmp_path.rglob("*.asdf"))
+
+    empty_manifest = observation.disperse_order(2, 1.0, 2.0, selected_ids=[])
+    assert empty_manifest["sources"] == {}
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "jw01089001001_03101_00001_nis_cal.fits",
+        "jw01089001001_03101_00001_nis_rate.fits",
+        "/data/jw01089001001_03101_00001_nis_assignwcsstep.fits",
+        "jw01089001001_03101_00001_nis.fits",
+    ],
+)
+def test_default_pdt_directory(filename):
+    assert _default_pdt_directory(filename) == Path("jw01089001001_03101_00001_nis_pdt")
+
+
+@pytest.mark.parametrize("explicit_directory", [None, "custom_pdt"])
+def test_step_pdt_directory(tmp_path, monkeypatch, explicit_directory):
+    from stdatamodels.jwst import datamodels
+
+    from jwst.wfss_geom.wfss_geom_step import WfssGeomStep
+
+    with datamodels.ImageModel() as model:
+        model.meta.filename = "jw01089001001_03101_00001_nis_cal.fits"
+        step = WfssGeomStep(output_dir=str(tmp_path), pdt_directory=explicit_directory)
+        monkeypatch.setattr(step, "prepare_output", lambda *args, **kwargs: model)
+        monkeypatch.setattr(step, "get_reference_file", lambda *args: "reference.fits")
+        monkeypatch.setattr(datamodels, "WavelengthrangeModel", lambda *args: nullcontext(None))
+        monkeypatch.setattr(datamodels, "open", lambda *args: nullcontext(None))
+        directories = []
+
+        def capture_directory(*args, **kwargs):
+            directories.append(kwargs["pdt_directory"])
+            return {}
+
+        monkeypatch.setattr(wfss_geom, "disperse_all", capture_directory)
+        assert step.process(model) == {}
+        expected = (
+            Path(explicit_directory)
+            if explicit_directory is not None
+            else tmp_path / "jw01089001001_03101_00001_nis_pdt"
+        )
+        assert Path(directories[0]) == expected
+
+
+def test_pdt_directory_overwrite(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(
+        wfss_geom, "native_wavelength_grid", lambda *args, **kwargs: np.array([1.0, 2.0])
+    )
+    first = make_observation(tmp_path).disperse_order(1, 1.0, 2.0, selected_ids=[1])
+    stale_file = Path(first["directory"]) / "stale.asdf"
+    stale_file.touch()
+    second = make_observation(tmp_path).disperse_order(1, 1.0, 2.0, selected_ids=[2])
+
+    assert first["directory"] == second["directory"] == str((tmp_path / "test_pdt").resolve())
+    assert not stale_file.exists()
+    assert not Path(first["sources"][1][0]).exists()
+    assert Path(second["sources"][2][0]).exists()
+    assert "Overwriting existing PDT directory" in caplog.text
+
+
+def test_failed_pdt_write_removes_temporary_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        wfss_geom, "native_wavelength_grid", lambda *args, **kwargs: np.array([1.0, 2.0])
+    )
+
+    def fail_write(*args, **kwargs):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(wfss_geom.asdf.AsdfFile, "write_to", fail_write)
+    with pytest.raises(OSError, match="disk failure"):
+        make_observation(tmp_path).disperse_order(1, 1.0, 2.0, selected_ids=[1])
+
+    assert not list(tmp_path.rglob("*.tmp"))
+    assert not list(tmp_path.rglob("*.asdf"))
 
 
 def test_disperse_geometry_pixel_index_pointer(monkeypatch):
@@ -64,56 +269,3 @@ def test_disperse_geometry_pixel_index_pointer(monkeypatch):
             np.testing.assert_array_equal(
                 np.unique(wavelength_index[start:stop]), np.arange(n_wavelengths)
             )
-
-
-def test_combine_geometry_chunks_rebases_pixel_index_pointer():
-    first = {
-        "input_xy": np.array([[1, 2], [3, 4]]),
-        "source_id": np.array([10, 10]),
-        "pixel_idx_ptr": np.array([0, 2, 2]),
-        "grism_xy": np.array([[5, 6], [7, 8]]),
-        "wavelength_index": np.array([0, 1]),
-        "fractional_area": np.array([0.25, 0.75]),
-    }
-    second = {
-        "input_xy": np.array([[9, 10], [11, 12]]),
-        "source_id": np.array([20, 20]),
-        "pixel_idx_ptr": np.array([0, 1, 3]),
-        "grism_xy": np.array([[13, 14], [15, 16], [17, 18]]),
-        "wavelength_index": np.array([1, 0, 1]),
-        "fractional_area": np.array([0.5, 0.2, 0.8]),
-    }
-
-    pdt = _combine_geom_chunks([first, second], wavelength=np.array([1.0, 2.0]))
-
-    np.testing.assert_array_equal(pdt["pixel_idx_ptr"], [0, 2, 2, 3, 5])
-    np.testing.assert_array_equal(pdt["input_xy"], [[1, 2], [3, 4], [9, 10], [11, 12]])
-    np.testing.assert_array_equal(pdt["source_id"], [10, 10, 20, 20])
-    np.testing.assert_array_equal(pdt["grism_xy"], [[5, 6], [7, 8], [13, 14], [15, 16], [17, 18]])
-    np.testing.assert_array_equal(pdt["wavelength_index"], [0, 1, 1, 0, 1])
-    np.testing.assert_array_equal(pdt["fractional_area"], [0.25, 0.75, 0.5, 0.2, 0.8])
-
-
-def test_combine_geometry_chunks_empty():
-    pdt = _combine_geom_chunks([], wavelength=np.array([1.0, 2.0]))
-
-    assert pdt["input_xy"].shape == (0, 2)
-    assert pdt["source_id"].shape == (0,)
-    np.testing.assert_array_equal(pdt["pixel_idx_ptr"], [0])
-    assert pdt["grism_xy"].shape == (0, 2)
-    assert pdt["wavelength_index"].shape == (0,)
-    assert pdt["fractional_area"].shape == (0,)
-
-    empty_chunk = {
-        "input_xy": np.array([[1, 2], [3, 4]]),
-        "source_id": np.array([10, 20]),
-        "pixel_idx_ptr": np.zeros(3, dtype=np.intp),
-        "grism_xy": np.empty((0, 2), dtype=int),
-        "wavelength_index": np.empty(0, dtype=int),
-        "fractional_area": np.empty(0, dtype=float),
-    }
-    pdt = _combine_geom_chunks([empty_chunk], wavelength=np.array([1.0, 2.0]))
-
-    np.testing.assert_array_equal(pdt["pixel_idx_ptr"], [0, 0, 0])
-    np.testing.assert_array_equal(pdt["input_xy"], empty_chunk["input_xy"])
-    np.testing.assert_array_equal(pdt["source_id"], empty_chunk["source_id"])

@@ -2,6 +2,7 @@ import dataclasses
 import logging
 import warnings
 
+import asdf
 import numpy as np
 from astropy.stats import SigmaClip
 from astropy.utils.exceptions import AstropyUserWarning
@@ -92,10 +93,9 @@ class Observation:
     """
     Define an observation leading to a single grism image.
 
-    The Observation class is responsible for calling the various WCS transforms that convert
-    a direct image and a segmentation image into a simulation of the grism image, making
-    assumptions about the spectral properties of the direct image sources.
-    When the `disperse_order` method is called one or more times, two products are created:
+    The Observation class applies flux models to file-backed pixel dispersion tables,
+    reading one source part at a time to construct simulated grism images.
+    When the `simulate_order` method is called one or more times, two products are created:
     the simulated dispersed image (``simulated_image`` attribute) and
     the simulated source cutouts (``simulated_cutouts`` attribute).
     """
@@ -116,7 +116,8 @@ class Observation:
             Direct imaging data.  May be 2-D ``(ny, nx)`` for a single-band
             direct image, or 3-D ``(N, ny, nx)`` for a multi-band cube.
         pdt : dict
-            Table
+            Per-order geometry manifests. Each order's ``sources`` mapping contains
+            source IDs and ordered lists of standalone ASDF source-part filenames.
         boundaries : list, optional
             Start/Stop coordinates of the FOV within the larger seed image.
         band_wavelengths : array-like of shape (N,), optional
@@ -164,7 +165,7 @@ class Observation:
         basis_models=None,
     ):
         """
-        Disperse the sources for a given spectral order, with multiprocessing.
+        Model a spectral order by reading source-part geometry files sequentially.
 
         The ``simulated_cutouts`` and ``simulated_image`` attributes are updated in place.
 
@@ -182,27 +183,107 @@ class Observation:
             are linearly fit later. If None, no models are included in the output.
         """
         pdt_order = self.pdt[order]
-        source_results = contam_model(
-            pdt_order,
-            self.dimage,
-            self.band_wavelengths,
-            sens_waves,
-            sens_response,
-            basis_models=basis_models,
-        )
+        for sid, filenames in pdt_order["sources"].items():
+            source_results = {}
+            for filename in filenames:
+                with asdf.open(filename) as table:
+                    if table.tree["spectral_order"] != order:
+                        raise ValueError(
+                            f"PDT spectral order does not match order {order}: {filename}"
+                        )
+                    results = contam_model(
+                        table.tree,
+                        self.dimage,
+                        self.band_wavelengths,
+                        sens_waves,
+                        sens_response,
+                        basis_models=basis_models,
+                    )
+                    if results and set(results) != {sid}:
+                        raise ValueError(f"PDT source does not match source {sid}: {filename}")
+                    if results:
+                        source_results = _aggregate_by_source(results, sid, source_results)
+                    del results
+            if not source_results:
+                continue
 
-        # Now add the combined results to the simulation
-        for sid in source_results:
-            bounds = source_results[sid]["bounds"]
-            img = source_results[sid]["image"]
+            bounds = source_results["bounds"]
+            img = source_results["image"]
             slitmodel = _construct_simulated_cutout(img, bounds, sid, order)
-            fluxmodels = source_results[sid].get("model_counts", [])
+            fluxmodels = source_results.get("model_counts", [])
             for i, fm in enumerate(fluxmodels):
                 # use i+1 indexing because typically the first model will be the linear order
                 # for polynomial fitting. The 0th order is what's already in slitmodel.data
                 setattr(slitmodel, f"fluxmodel_{i + 1}", fm)
             self.simulated_image[bounds[2] : bounds[3] + 1, bounds[0] : bounds[1] + 1] += img
             self.simulated_cutouts.append(slitmodel)
+
+
+def _aggregate_by_source(results, sid, source_results):
+    """
+    Combine results from different chunks into a single image and bounds for each source ID.
+
+    Parameters
+    ----------
+    results : dict
+        Dictionary containing the results for each source ID in the current chunk, in the format:
+        {source_id: {"bounds": [xmin, xmax, ymin, ymax], "image": 2D array,
+        "model_counts": list of 2D arrays}}
+    sid : int
+        Source ID
+    source_results : dict
+        Dictionary to store simulated image and bounds for each source ID,
+        in the same format as results but with images and bounds aggregated.
+        Updated in place.
+    """
+    if sid not in source_results:
+        source_results[sid] = {
+            "bounds": results[sid]["bounds"],
+            "image": results[sid]["image"],
+            "model_counts": results[sid].get("model_counts", []),
+        }
+        return
+
+    # Combine bounds
+    old_bounds = source_results[sid]["bounds"]
+    new_bounds = results[sid]["bounds"]
+    combined_bounds = [
+        min(old_bounds[0], new_bounds[0]),
+        max(old_bounds[1], new_bounds[1]),
+        min(old_bounds[2], new_bounds[2]),
+        max(old_bounds[3], new_bounds[3]),
+    ]
+
+    combined_shape = (
+        combined_bounds[3] - combined_bounds[2] + 1,
+        combined_bounds[1] - combined_bounds[0] + 1,
+    )
+
+    # Helper to place an existing sub-image into the combined image
+    def _place(old_arr, old_b):
+        out = np.zeros(combined_shape, dtype=float)
+        y0 = old_b[2] - combined_bounds[2]
+        x0 = old_b[0] - combined_bounds[0]
+        out[y0 : y0 + old_arr.shape[0], x0 : x0 + old_arr.shape[1]] = old_arr
+        return out
+
+    old_img = _place(source_results[sid]["image"], old_bounds)
+    new_img = _place(results[sid]["image"], new_bounds)
+    combined_image = old_img + new_img
+
+    # Sum model_counts across chunks (same as image)
+    old_mcs = source_results[sid].get("model_counts", [])
+    new_mcs = results[sid].get("model_counts", [])
+    combined_mcs = [
+        _place(old_mc, old_bounds) + _place(new_mc, new_bounds)
+        for old_mc, new_mc in zip(old_mcs, new_mcs, strict=True)
+    ]
+
+    source_results[sid] = {
+        "bounds": combined_bounds,
+        "image": combined_image,
+        "model_counts": combined_mcs,
+    }
 
 
 def _construct_simulated_cutout(

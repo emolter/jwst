@@ -1,7 +1,9 @@
 import logging
+from pathlib import Path
 
 from stdatamodels.jwst import datamodels
 
+from jwst.lib.suffix import remove_suffix
 from jwst.stpipe import Step
 from jwst.wfss_geom import wfss_geom
 
@@ -21,6 +23,7 @@ class WfssGeomStep(Step):
         magnitude_limit = float(default=None) # Isophotal AB magnitude limit for sources to be included in the contamination correction
         wl_oversample = integer(default=2) # oversampling factor for wavelength grid
         max_pixels_per_chunk = integer(default=5000) # max number of pixels to disperse at once
+        pdt_directory = string(default=None) # PDT directory; defaults to <input root>_pdt under output_dir
         pdt_spacing = integer(default=None)  # Spacing of grid points per spatial axis for the trace lookup table; None disables spatial interpolation and uses the full transform at every pixel
         pdt_wl_oversample = float(default=None)  # Oversampling factor for the trace lookup table's wavelength grid; None matches the grid specified by wl_oversample
     """  # noqa: E501
@@ -38,8 +41,11 @@ class WfssGeomStep(Step):
 
         Returns
         -------
-        output_model : `~stdatamodels.jwst.datamodels.ImageModel`
-            Still TBD what goes here.
+        pdt : dict or None
+            Per-order manifests mapping source IDs to standalone ASDF file lists,
+            or None when skipped. Files persist for reuse; callers own cleanup
+            of the directory reported in each order's manifest. Existing PDT
+            directories are overwritten with a warning.
         """
         output_model = self.prepare_output(input_data, open_as_type=datamodels.ImageModel)
 
@@ -53,6 +59,11 @@ class WfssGeomStep(Step):
 
         # Get requested orders
         orders = [int(o) for o in self.orders] if self.orders else None
+        pdt_directory = self.pdt_directory
+        if pdt_directory is None:
+            pdt_directory = Path(self.output_dir or ".") / _default_pdt_directory(
+                output_model.meta.filename
+            )
 
         with (
             datamodels.WavelengthrangeModel(waverange_ref) as waverange_model,
@@ -69,6 +80,7 @@ class WfssGeomStep(Step):
                 max_pixels_per_chunk=self.max_pixels_per_chunk,
                 pdt_spacing=self.pdt_spacing,
                 pdt_wl_oversample=self.pdt_wl_oversample,
+                pdt_directory=pdt_directory,
             )
 
         if pdt is not None:
@@ -76,3 +88,8 @@ class WfssGeomStep(Step):
         else:
             output_model.meta.cal_step.wfss_geom = "SKIPPED"
         return pdt
+
+
+def _default_pdt_directory(filename):
+    stem = Path(filename or "wfss").stem
+    return Path(f"{remove_suffix(stem)[0]}_pdt")
