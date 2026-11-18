@@ -150,7 +150,6 @@ def disperse(
     # can index based on these smaller arrays instead of the (nlam, n_pixels) broadcasts.
     n_pixels = len(source_ids_per_pixel)
     source_ids_1d = source_ids_per_pixel
-    source_ids_per_pixel = np.repeat(source_ids_per_pixel[np.newaxis, :], nlam, axis=0)
 
     x0s, y0s, lambdas = _disperse_onto_grism(
         x0_sky,
@@ -181,20 +180,18 @@ def disperse(
     # The resulting x, y coordinate pairs are non-unique: there are multiple wavelengths
     # that contribute to each pixel.
     padding = 1
-    xs, ys, areas, index = get_clipped_pixels(x0s, y0s, padding, naxis[0], naxis[1], width, height)
+    xs, ys, areas, index = get_clipped_pixels(
+        np.ascontiguousarray(x0s.T),
+        np.ascontiguousarray(y0s.T),
+        padding,
+        naxis[0],
+        naxis[1],
+        width,
+        height,
+    )
     del x0s, y0s
 
-    # get_clipped_pixels treats its (nlam, n_pixels) inputs as flattened in C order,
-    # so `index` decomposes into a (wavelength, pixel) pair. Use that to gather
-    # lambdas and source_ids_per_pixel from their small 1-D arrays, which is cheaper to compute
-    # than, e.g., lambdas=np.take(lambdas, index)
-    lam_idx, pixel_idx = np.divmod(index, n_pixels)
-    contribution_order = np.argsort(pixel_idx, kind="stable")
-    pixel_idx = pixel_idx[contribution_order]
-    lam_idx = lam_idx[contribution_order]
-    xs = xs[contribution_order]
-    ys = ys[contribution_order]
-    areas = areas[contribution_order]
+    pixel_idx, lam_idx = np.divmod(index, nlam)
     pixel_idx_ptr = np.empty(n_pixels + 1, dtype=np.intp)
     pixel_idx_ptr[0] = 0
     np.cumsum(np.bincount(pixel_idx, minlength=n_pixels), out=pixel_idx_ptr[1:])

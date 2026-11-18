@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from astropy.modeling.models import Identity, Mapping
 
+from jwst.lib.winclip import get_clipped_pixels
 from jwst.wfss_geom import disperse, wfss_geom
 from jwst.wfss_geom.wfss_geom import Observation
 from jwst.wfss_geom.wfss_geom_step import _default_pdt_directory
@@ -29,6 +30,41 @@ def make_observation(tmp_path, max_cpu=1):
         max_pixels_per_chunk=5,
         pdt_directory=tmp_path / "test_pdt",
     )
+
+
+def test_pixel_major_clipping_matches_sorted_wavelength_major(monkeypatch):
+    rng = np.random.default_rng(42)
+    nlam, n_pixels = 7, 6
+    grism_x = rng.uniform(-2, 12, (nlam, n_pixels))
+    grism_y = rng.uniform(-2, 12, (nlam, n_pixels))
+    grism_x[:, -1] = 50
+    grism_x[0, 0] = np.nan
+    wavelengths = np.linspace(1.0, 2.0, nlam)
+    monkeypatch.setattr(
+        disperse,
+        "_disperse_onto_grism",
+        lambda *args, **kwargs: (grism_x, grism_y, wavelengths),
+    )
+    actual = disperse.disperse(
+        np.arange(n_pixels),
+        np.zeros(n_pixels, dtype=int),
+        np.arange(1, n_pixels + 1),
+        1,
+        wavelengths,
+        Identity(2),
+        GeometryTestWCS(),
+        (10, 10),
+    )
+    xs, ys, areas, index = get_clipped_pixels(grism_x, grism_y, 1, 10, 10, 1.0, 1.0)
+    wavelength_index, pixel_index = np.divmod(index, n_pixels)
+    ordering = np.argsort(pixel_index, kind="stable")
+    np.testing.assert_array_equal(actual["grism_xy"], np.column_stack((xs[ordering], ys[ordering])))
+    np.testing.assert_array_equal(actual["fractional_area"], areas[ordering])
+    np.testing.assert_array_equal(actual["wavelength_index"], wavelength_index[ordering])
+    expected_pointer = np.concatenate(
+        ([0], np.cumsum(np.bincount(pixel_index, minlength=n_pixels)))
+    )
+    np.testing.assert_array_equal(actual["pixel_idx_ptr"], expected_pointer)
 
 
 def test_source_aware_chunks(tmp_path):

@@ -80,7 +80,7 @@ def _disperse_to_files(disperse_args, directory, source_parts):
                     "fractional_area": geometry["fractional_area"][first:last].copy(),
                 }
                 with asdf.AsdfFile(tree) as table:
-                    table.write_to(handle.file)
+                    table.write_to(handle.file, write_checksums=False)
             temporary_path.replace(filename)
         finally:
             if temporary_path is not None:
