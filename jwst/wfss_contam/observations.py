@@ -202,15 +202,16 @@ class Observation:
                     if results and set(results) != {sid}:
                         raise ValueError(f"PDT source does not match source {sid}: {filename}")
                     if results:
-                        source_results = _aggregate_by_source(results, sid, source_results)
+                        _aggregate_by_source(results, sid, source_results)
                     del results
             if not source_results:
                 continue
 
-            bounds = source_results["bounds"]
-            img = source_results["image"]
+            source_result = source_results[sid]
+            bounds = source_result["bounds"]
+            img = source_result["image"]
             slitmodel = _construct_simulated_cutout(img, bounds, sid, order)
-            fluxmodels = source_results.get("model_counts", [])
+            fluxmodels = source_result.get("model_counts", [])
             for i, fm in enumerate(fluxmodels):
                 # use i+1 indexing because typically the first model will be the linear order
                 # for polynomial fitting. The 0th order is what's already in slitmodel.data
