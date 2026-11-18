@@ -303,5 +303,5 @@ def contam_model(
             model_counts.append(basis_counts)
 
     xs, ys = pdt["grism_xy"].T
-    source_ids_per_contribution = pdt["source_id"][input_pixel_index]
+    source_ids_per_contribution = np.broadcast_to(int(pdt["source_id"]), wavelength_index.shape)
     return _collect_outputs_by_source(xs, ys, counts, source_ids_per_contribution, model_counts)

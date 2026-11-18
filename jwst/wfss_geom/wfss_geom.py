@@ -60,6 +60,8 @@ def _disperse_to_files(disperse_args, directory, source_parts):
         first, last = int(pointers[0]), int(pointers[-1])
         if first == last:
             continue
+        has_contributions = np.diff(pointers) > 0
+        compact_pointers = np.concatenate((pointers[:-1][has_contributions], pointers[-1:])) - first
 
         filename = Path(directory) / (
             f"source_{source_id:06d}_order_{int(disperse_args[3])}_"
@@ -70,11 +72,11 @@ def _disperse_to_files(disperse_args, directory, source_parts):
             with tempfile.NamedTemporaryFile(dir=directory, suffix=".tmp", delete=False) as handle:
                 temporary_path = Path(handle.name)
                 tree = {
+                    "source_id": int(source_id),
                     "wavelength": disperse_args[4].copy(),
                     "spectral_order": int(disperse_args[3]),
-                    "input_xy": geometry["input_xy"][start:stop].copy(),
-                    "source_id": geometry["source_id"][start:stop].copy(),
-                    "pixel_idx_ptr": pointers - first,
+                    "input_xy": geometry["input_xy"][start:stop][has_contributions],
+                    "pixel_idx_ptr": compact_pointers,
                     "grism_xy": geometry["grism_xy"][first:last].copy(),
                     "wavelength_index": geometry["wavelength_index"][first:last].copy(),
                     "fractional_area": geometry["fractional_area"][first:last].copy(),
@@ -600,6 +602,7 @@ class Observation:
             with ctx.Pool(min(self.max_cpu, len(tasks))) as pool:
                 all_res = pool.starmap(_disperse_to_files, tasks, chunksize=1)
         else:
+            log.info(f"Processing {len(self.source_ids)} sources in {len(disperse_args)} chunks.")
             all_res = [_disperse_to_files(*task) for task in tasks]
         for result in all_res:
             for source_id, filenames in result.items():

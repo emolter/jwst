@@ -128,18 +128,19 @@ def test_file_backed_source_manifest(tmp_path, monkeypatch, max_cpu):
                     table = file.tree
                     np.testing.assert_array_equal(table["wavelength"], wavelength)
                     assert table["spectral_order"] == order
-                    assert np.all(table["source_id"] == source_id)
+                    assert np.ndim(table["source_id"]) == 0
+                    assert table["source_id"] == source_id
                     assert 0 < len(table["input_xy"]) <= 5
                     assert table["pixel_idx_ptr"][0] == 0
                     assert table["pixel_idx_ptr"][-1] == len(table["fractional_area"])
                     assert len(table["pixel_idx_ptr"]) == len(table["input_xy"]) + 1
                     assert len(table["grism_xy"]) == len(table["wavelength_index"])
-                    assert np.all(np.diff(table["pixel_idx_ptr"]) >= 0)
+                    assert np.all(np.diff(table["pixel_idx_ptr"]) > 0)
                     input_pixels.extend(table["input_xy"][:, 0])
                     expected = disperse.disperse(
                         table["input_xy"][:, 0],
                         table["input_xy"][:, 1],
-                        table["source_id"],
+                        np.full(len(table["input_xy"]), source_id),
                         order,
                         wavelength,
                         observation.direct_image_wcs,
@@ -147,7 +148,8 @@ def test_file_backed_source_manifest(tmp_path, monkeypatch, max_cpu):
                         observation.naxis,
                     )
                     for key, values in expected.items():
-                        np.testing.assert_array_equal(table[key], values)
+                        if key != "source_id":
+                            np.testing.assert_array_equal(table[key], values)
             np.testing.assert_array_equal(
                 input_pixels, np.where(observation.seg[0] == source_id)[0]
             )
