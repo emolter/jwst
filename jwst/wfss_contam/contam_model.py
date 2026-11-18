@@ -242,18 +242,18 @@ def contam_model(
         Dictionary containing dispersed images and bounds for each source ID
         in the specified spectral order.
     """
-    wavelength_index = pdt["wavelength_index"]
+    wavelength_index = np.asarray(pdt["wavelength_index"], dtype=np.intp)
     if wavelength_index.size == 0:
         return {}
 
-    input_x, input_y = pdt["input_xy"].T
+    input_x, input_y = np.asarray(pdt["input_xy"], dtype=np.intp).T
     if fluxes.ndim == 2:
         fluxes = fluxes[np.newaxis, ...]
     fluxes = fluxes[:, input_y, input_x].copy()
 
-    lambdas = pdt["wavelength"]
+    lambdas = np.asarray(pdt["wavelength"], dtype=float)
     nlam = lambdas.size
-    dlam = lambdas[1] - lambdas[0]
+    dlam = (lambdas[-1] - lambdas[0]) / (nlam - 1)
     # Interpolate the input fluxes onto the wavelength grid of the dispersed image
     if len(band_wavelengths) >= 2:
         # interp1d does not handle NaNs, so replace with interplation that assumes
@@ -277,10 +277,10 @@ def contam_model(
     # compute 1D sensitivity array corresponding to list of wavelengths
     sens, no_cal = create_1d_sens(lambdas, sens_waves, sens_resp)
 
-    contributions_per_pixel = np.diff(pdt["pixel_idx_ptr"])
+    contributions_per_pixel = np.diff(np.asarray(pdt["pixel_idx_ptr"], dtype=np.intp))
     input_pixel_index = np.repeat(np.arange(len(pdt["input_xy"])), contributions_per_pixel)
     contribution_flux = fluxes[wavelength_index, input_pixel_index]
-    fractional_area = pdt["fractional_area"]
+    fractional_area = np.asarray(pdt["fractional_area"], dtype=float)
 
     # Compute countrates for dispersed pixels.
     # The input direct image data is already photometrically calibrated,
@@ -302,6 +302,6 @@ def contam_model(
             basis_counts[no_cal[wavelength_index]] = 0.0
             model_counts.append(basis_counts)
 
-    xs, ys = pdt["grism_xy"].T
+    xs, ys = np.asarray(pdt["grism_xy"], dtype=np.intp).T
     source_ids_per_contribution = np.broadcast_to(int(pdt["source_id"]), wavelength_index.shape)
     return _collect_outputs_by_source(xs, ys, counts, source_ids_per_contribution, model_counts)

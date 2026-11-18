@@ -32,6 +32,18 @@ def make_observation(tmp_path, max_cpu=1):
     )
 
 
+@pytest.mark.parametrize("dtype", [np.uint16, np.uint32])
+def test_storage_uint_boundaries(dtype):
+    limit = np.iinfo(dtype).max
+    values = np.array([0, limit], dtype=np.int64)
+    stored = wfss_geom._storage_uint(values, dtype, "example")
+    assert stored.dtype == dtype
+    np.testing.assert_array_equal(stored, values)
+    for bad_values in [np.array([-1]), np.array([int(limit) + 1], dtype=np.int64)]:
+        with pytest.raises(OverflowError, match="example"):
+            wfss_geom._storage_uint(bad_values, dtype, "example")
+
+
 def test_pixel_major_clipping_matches_sorted_wavelength_major(monkeypatch):
     rng = np.random.default_rng(42)
     nlam, n_pixels = 7, 6
@@ -126,6 +138,14 @@ def test_file_backed_source_manifest(tmp_path, monkeypatch, max_cpu):
                 assert f"source_{source_id:06d}_order_{order}_part_{part:04d}.asdf" in filename
                 with asdf.open(filename) as file:
                     table = file.tree
+                    for key, dtype in {
+                        "wavelength": np.float32,
+                        "fractional_area": np.float32,
+                        "grism_xy": np.uint16,
+                        "wavelength_index": np.uint16,
+                        "pixel_idx_ptr": np.uint32,
+                    }.items():
+                        assert np.asarray(table[key]).dtype == np.dtype(dtype)
                     np.testing.assert_array_equal(table["wavelength"], wavelength)
                     assert table["spectral_order"] == order
                     assert np.ndim(table["source_id"]) == 0
@@ -149,7 +169,7 @@ def test_file_backed_source_manifest(tmp_path, monkeypatch, max_cpu):
                     )
                     for key, values in expected.items():
                         if key != "source_id":
-                            np.testing.assert_array_equal(table[key], values)
+                            np.testing.assert_allclose(table[key], values, rtol=1e-7, atol=0)
             np.testing.assert_array_equal(
                 input_pixels, np.where(observation.seg[0] == source_id)[0]
             )

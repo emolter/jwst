@@ -27,6 +27,13 @@ from jwst.wfss_geom.trace_pdt import (
 log = logging.getLogger(__name__)
 
 
+def _storage_uint(values, dtype, name):  # numpydoc ignore:RT01
+    """Copy an integer array to its on-disk dtype without allowing wraparound."""
+    if values.size and (values.min() < 0 or values.max() > np.iinfo(dtype).max):
+        raise OverflowError(f"PDT {name} values do not fit in {np.dtype(dtype).name}")
+    return values.astype(dtype, copy=True)
+
+
 def _disperse_to_files(disperse_args, directory, source_parts):
     """
     Disperse a single chunk and then write a PDT for each source in the chunk to disk.
@@ -73,13 +80,17 @@ def _disperse_to_files(disperse_args, directory, source_parts):
                 temporary_path = Path(handle.name)
                 tree = {
                     "source_id": int(source_id),
-                    "wavelength": disperse_args[4].copy(),
+                    "wavelength": disperse_args[4].astype(np.float32),
                     "spectral_order": int(disperse_args[3]),
                     "input_xy": geometry["input_xy"][start:stop][has_contributions],
-                    "pixel_idx_ptr": compact_pointers,
-                    "grism_xy": geometry["grism_xy"][first:last].copy(),
-                    "wavelength_index": geometry["wavelength_index"][first:last].copy(),
-                    "fractional_area": geometry["fractional_area"][first:last].copy(),
+                    "pixel_idx_ptr": _storage_uint(compact_pointers, np.uint32, "pixel_idx_ptr"),
+                    "grism_xy": _storage_uint(
+                        geometry["grism_xy"][first:last], np.uint16, "grism_xy"
+                    ),
+                    "wavelength_index": _storage_uint(
+                        geometry["wavelength_index"][first:last], np.uint16, "wavelength_index"
+                    ),
+                    "fractional_area": geometry["fractional_area"][first:last].astype(np.float32),
                 }
                 with asdf.AsdfFile(tree) as table:
                     table.write_to(handle.file, write_checksums=False)
