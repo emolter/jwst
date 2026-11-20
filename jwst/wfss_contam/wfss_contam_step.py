@@ -1,8 +1,10 @@
 import logging
 import warnings
+from pathlib import Path
 
 from stdatamodels.jwst import datamodels
 
+from jwst.lib.suffix import remove_suffix
 from jwst.stpipe import Step
 from jwst.wfss_contam import wfss_contam
 
@@ -31,6 +33,9 @@ class WfssContamStep(Step):
         rejection_threshold = float(default=0.1)  # Threshold for rejecting polynomial fits based on fitted constant term coefficient
         pdt_spacing = integer(default=None)  # Spacing of grid points per spatial axis for the trace lookup table; None disables spatial interpolation and uses the full transform at every pixel
         pdt_wl_oversample = float(default=None)  # Oversampling factor for the trace lookup table's wavelength grid; None matches the grid specified by wl_oversample
+        save_pdt = boolean(default=False)  # Save pixel dispersion tables for reuse
+        force_recompute_pdt = boolean(default=False)  # Ignore any existing pixel dispersion table cache
+        pdt_directory = string(default=None)  # Defaults to <input root>_pdt under output_dir
     """  # noqa: E501
 
     reference_file_types = ["photom", "wavelengthrange"]
@@ -61,6 +66,11 @@ class WfssContamStep(Step):
             log.warning(msg)
 
         output_model = self.prepare_output(input_data, open_as_type=datamodels.MultiSlitModel)
+        pdt_directory = self.pdt_directory
+        if pdt_directory is None:
+            stem = Path(output_model.meta.filename or "wfss").stem
+            pdt_directory = Path(self.output_dir or ".") / f"{remove_suffix(stem)[0]}_pdt"
+        load_pdt = not self.force_recompute_pdt and Path(pdt_directory).is_dir()
 
         # Get the wavelengthrange ref file
         waverange_ref = self.get_reference_file(output_model, "wavelengthrange")
@@ -92,6 +102,9 @@ class WfssContamStep(Step):
                 rejection_threshold=self.rejection_threshold,
                 pdt_spacing=self.pdt_spacing,
                 pdt_wl_oversample=self.pdt_wl_oversample,
+                save_pdt=self.save_pdt,
+                load_pdt=load_pdt,
+                pdt_directory=pdt_directory,
             )
         if simul is None:
             # Input model is returned as result, no intermediate models created

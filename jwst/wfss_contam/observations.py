@@ -1,15 +1,20 @@
 import dataclasses
+import json
 import logging
 import multiprocessing as mp
+import shutil
+import tempfile
 import time
 import warnings
+from pathlib import Path
 
 import numpy as np
 from astropy.stats import SigmaClip
 from astropy.utils.exceptions import AstropyUserWarning
 from photutils.background import Background2D, MedianBackground
 
-from jwst.wfss_contam.disperse import disperse
+from jwst.wfss_contam.disperse import disperse_and_model
+from jwst.wfss_contam.pdt_fileio import load_pdt_from_files
 from jwst.wfss_contam.trace_pdt import (
     build_trace_pdt,
     get_grism_detector_transform,
@@ -128,6 +133,37 @@ def _select_ids(source_id, all_ids):
         raise ValueError("ID must be an integer or a list of integers")
 
 
+def _chunk_bounds_keep_sources_together(sorted_source_ids, max_pixels):
+    """
+    Determine chunk boundaries for a sorted list of source IDs.
+
+    Respect a maximum pixel limit, and keep sources together within a single chunk
+    unless they are larger than that limit.
+
+    Returns
+    -------
+    list
+        List of (start, stop) indices for each chunk.
+    """
+    _, source_sizes = np.unique(sorted_source_ids, return_counts=True)
+    chunk_bounds = []
+    batch_start = batch_stop = 0
+    for source_size in source_sizes:
+        source_stop = batch_stop + int(source_size)
+        if source_size > max_pixels:
+            while source_stop - batch_start >= max_pixels:
+                chunk_stop = batch_start + max_pixels
+                chunk_bounds.append((batch_start, chunk_stop))
+                batch_start = chunk_stop
+        elif source_stop - batch_start > max_pixels:
+            chunk_bounds.append((batch_start, batch_stop))
+            batch_start = batch_stop
+        batch_stop = source_stop
+    if batch_stop > batch_start:
+        chunk_bounds.append((batch_start, batch_stop))
+    return chunk_bounds
+
+
 class Observation:
     """
     Define an observation leading to a single grism image.
@@ -151,6 +187,9 @@ class Observation:
         max_pixels_per_chunk=5e4,
         oversample_factor=2,
         band_wavelengths=None,
+        save_pdt=False,
+        load_pdt=False,
+        pdt_directory=None,
     ):
         """
         Initialize all data and metadata for a given observation.
@@ -177,16 +216,26 @@ class Observation:
         band_wavelengths : array-like of shape (N,), optional
             Central wavelengths (in microns) for each plane of a 3-D ``direct_image``.
             Required when ``direct_image`` is 3-D; ignored when ``direct_image`` is 2-D.
+        save_pdt : bool
+            Whether to save the PDT files to disk.
+        load_pdt : bool
+            Whether to reuse geometry for orders with a completed PDT manifest.
+        pdt_directory : str or Path, optional
+            Location of the PDT cache. Required when loading.
         """
+        if load_pdt and pdt_directory is None:
+            raise ValueError("pdt_directory is required when loading a PDT cache")
+        self.save_pdt = save_pdt
+        self.load_pdt = load_pdt
+        self.pdt_directory = pdt_directory
+        self._pdt_run_directory = None
         if boundaries is None:
             boundaries = []
         # Load all the info for this grism mode
         self.direct_image_wcs = direct_image_wcs
         self.grism_wcs = grism_wcs
         self.seg = segmentation_map
-        all_ids = list(set(np.ravel(self.seg)))
-        all_ids.remove(0)  # Remove the background ID
-        self.source_ids = all_ids
+        self.source_ids = [sid for sid in np.unique(self.seg).tolist() if sid != 0]
         self.max_cpu = max_cpu
         self.max_pixels_per_chunk = max_pixels_per_chunk
         self.oversample_factor = oversample_factor
@@ -243,12 +292,12 @@ class Observation:
         sens_waves,
         sens_response,
         selected_ids=None,
-        max_pixels=1e5,
+        max_pixels=5000,
         basis_models=None,
         trace_pdt=None,
     ):
         """
-        Chunk the sources into groups of max_pixels.
+        Pack whole sources into bounded batches, splitting only oversized sources.
 
         Parameters
         ----------
@@ -257,19 +306,13 @@ class Observation:
         lambdas : ndarray
             Wavelengths at which to compute dispersed pixel values for this order,
             precomputed once per order.
-        sens_waves : ndarray
-            Wavelength array from photom reference file
-        sens_response : ndarray
-            Response (flux calibration) array from photom reference file
         selected_ids : list, optional
             List of source IDs to process. If None, all sources are processed.
         max_pixels : int, optional
-            Maximum number of pixels per chunk.
-        basis_models : list of callables, optional
-            Flux distributions to evaluate at each wavelength. Typically these will be
-            Legendre polynomials from 1st order up to a given max order, e.g.
-            [P1(x), P2(x), ...], the coefficients of which are linearly fit later.
-            If None, no models are included in the output.
+            Hard maximum number of input pixels per chunk. Small sources are kept
+            whole; only sources whose total size exceeds this limit may be split
+            to fill available batch space. Their final partial batch remains open
+            for subsequent whole sources.
         trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
             Precomputed pixel dispersion table for this spectral order.
             If None, no lookup table is used.
@@ -283,6 +326,8 @@ class Observation:
         """
         source_ids = _select_ids(selected_ids, self.source_ids)
         max_pixels = int(max_pixels)
+        if max_pixels < 1:
+            raise ValueError("max_pixels must be at least 1")
 
         # Create a mask for selected sources
         selected_mask = np.isin(self.source_ids_per_pixel, source_ids)
@@ -290,41 +335,34 @@ class Observation:
         # Get pixels for selected sources
         selected_xs = self.xs[selected_mask]
         selected_ys = self.ys[selected_mask]
-        selected_fluxes = self.fluxes[:, selected_mask]
         selected_source_ids = self.source_ids_per_pixel[selected_mask]
 
         # Sort by source ID to keep sources mostly together
-        # This reduces the number of times we have to call build_dispersed_image_of_source
-        # within disperse()
-        sort_indices = np.argsort(selected_source_ids)
+        sort_indices = np.argsort(selected_source_ids, kind="stable")
         sorted_xs = selected_xs[sort_indices]
         sorted_ys = selected_ys[sort_indices]
-        sorted_fluxes = selected_fluxes[:, sort_indices]
         sorted_source_ids = selected_source_ids[sort_indices]
+        sorted_fluxes = self.fluxes[:, np.flatnonzero(selected_mask)[sort_indices]]
 
-        # Split into chunks of max_pixels
+        # Build up chunks that respect the max_pixels limit while keeping sources together
         total_pixels = len(sorted_xs)
-        n_chunks = int(np.ceil(total_pixels / max_pixels))
-
+        chunk_bounds = _chunk_bounds_keep_sources_together(sorted_source_ids, max_pixels)
         log.info(
-            f"Splitting {total_pixels} pixels from {len(source_ids)} sources into {n_chunks} chunks"
+            f"Splitting {total_pixels} pixels from {len(source_ids)} sources into "
+            f"{len(chunk_bounds)} chunks"
         )
 
         disperse_args = []
-        for i in range(n_chunks):
-            start_idx = i * max_pixels
-            end_idx = min((i + 1) * max_pixels, total_pixels)
-
+        for start_idx, end_idx in chunk_bounds:
             chunk_xs = sorted_xs[start_idx:end_idx]
             chunk_ys = sorted_ys[start_idx:end_idx]
-            chunk_fluxes = sorted_fluxes[:, start_idx:end_idx]
             chunk_source_ids = sorted_source_ids[start_idx:end_idx]
 
             disperse_args.append(
                 [
                     chunk_xs,
                     chunk_ys,
-                    chunk_fluxes,
+                    sorted_fluxes[:, start_idx:end_idx],
                     self.band_wavelengths,
                     chunk_source_ids,
                     order,
@@ -388,6 +426,82 @@ class Observation:
             `~jwst.wfss_contam.trace_pdt.TracePDT.evaluate_grid` to skip wavelength-axis
             interpolation entirely. Only used if ``pdt_spacing`` is not None.
         """
+        order_directory = (
+            Path(self.pdt_directory) / f"order_{int(order)}" if self.load_pdt else None
+        )
+        reuse_cache = order_directory is not None and (order_directory / "manifest.json").is_file()
+        save_order = self.save_pdt and not reuse_cache
+        if reuse_cache:
+            log.info("Reusing PDT cache in %s", order_directory)
+            disperse_args = self._cached_part_args(
+                order, selected_ids, sens_waves, sens_response, basis_models
+            )
+        else:
+            disperse_args, lambdas = self._fresh_part_args(
+                order,
+                wmin,
+                wmax,
+                sens_waves,
+                sens_response,
+                selected_ids,
+                basis_models,
+                pdt_spacing,
+                pdt_wl_oversample,
+            )
+
+        if save_order:
+            directory = self._make_pdt_directory(order)
+            part_counts = {}
+            for args in disperse_args:
+                source_parts = {}
+                for source_id in np.unique(args[4]).tolist():
+                    part_number = part_counts.get(source_id, 0)
+                    source_parts[source_id] = part_number
+                    part_counts[source_id] = part_number + 1
+                args.extend((directory, source_parts))
+
+        t0 = time.time()
+        workers = min(self.max_cpu, len(disperse_args))
+        log.info("Using %s CPU core(s) to model %s PDT batches...", workers, len(disperse_args))
+        if workers > 1:
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(workers) as pool:
+                all_res = pool.starmap(disperse_and_model, disperse_args, chunksize=1)
+        else:
+            all_res = [disperse_and_model(*args) for args in disperse_args]
+        log.info(f"Wall clock time for disperse_chunk order {order}: {time.time() - t0:.1f} sec")
+
+        source_results = {}
+        if save_order:
+            sources = {int(sid): [] for sid in _select_ids(selected_ids, self.source_ids)}
+        for results in all_res:
+            if save_order:
+                results, written_parts = results
+                for sid, parts in written_parts.items():
+                    sources[sid].extend(parts)
+            for sid in results:
+                _aggregate_by_source(results, sid, source_results)
+
+        if save_order:
+            temporary_manifest = directory / "manifest.tmp"
+            with temporary_manifest.open("w") as manifest_file:
+                json.dump({"wavelength": lambdas.tolist(), "sources": sources}, manifest_file)
+            temporary_manifest.replace(directory / "manifest.json")
+
+        self._add_source_results(order, source_results)
+
+    def _fresh_part_args(
+        self,
+        order,
+        wmin,
+        wmax,
+        sens_waves,
+        sens_response,
+        selected_ids,
+        basis_models,
+        pdt_spacing,
+        pdt_wl_oversample,
+    ):
         # Determine the wavelength grid once per order.
         # native spacing does not vary significantly across the detector, so a single
         # representative pixel is good enough.
@@ -453,38 +567,47 @@ class Observation:
             basis_models=basis_models,
             trace_pdt=trace_pdt_obj,
         )
-        t0 = time.time()
-        if self.max_cpu > 1:
-            # Use multiprocessing to disperse the sources
-            log.info(
-                f"Using {self.max_cpu} CPU cores for multiprocessing "
-                f"{len(self.source_ids)} sources in {len(disperse_args)} chunks."
+        return disperse_args, lambdas
+
+    def _cached_part_args(self, order, selected_ids, sens_waves, sens_response, basis_models):
+        directory = Path(self.pdt_directory) / f"order_{int(order)}"
+        selected_ids = _select_ids(selected_ids, self.source_ids)
+        lambdas, parts = load_pdt_from_files(directory, order, selected_ids)
+        disperse_args = []
+        for sid, path, input_xy in parts:
+            input_x, input_y = np.asarray(input_xy, dtype=np.intp).T
+            if not np.all(self.seg[input_y, input_x] == sid):
+                raise ValueError(
+                    f"PDT pixels do not match the current segmentation for source {sid}"
+                )
+            fluxes = self.dimage[..., input_y, input_x]
+            if fluxes.ndim == 1:
+                fluxes = fluxes[np.newaxis, :]
+            disperse_args.append(
+                (
+                    None,
+                    None,
+                    fluxes,
+                    self.band_wavelengths,
+                    None,
+                    order,
+                    lambdas,
+                    sens_waves,
+                    sens_response,
+                    None,
+                    None,
+                    self.naxis,
+                    basis_models,
+                    None,
+                    None,
+                    None,
+                    (sid, path),
+                )
             )
-            ctx = mp.get_context("spawn")
-            pool = ctx.Pool(self.max_cpu)
-            try:
-                all_res = pool.starmap(disperse, disperse_args)
-            except Exception as e:
-                log.error(f"Error during parallel processing: {e}")
-                raise
-            finally:
-                pool.close()
-                pool.join()
-        else:
-            all_res = [disperse(*args) for args in disperse_args]
-        t1 = time.time()
-        log.info(f"Wall clock time for disperse_chunk order {order}: {(t1 - t0):.1f} sec")
+        return disperse_args
 
-        # Combine results from all chunks, aggregating by source ID
-        source_results = {}
-        for results in all_res:
-            if results is None:
-                # None of the sources in this chunk for this order had pixels on the detector
-                continue
-            for sid in results:
-                _aggregate_by_source(results, sid, source_results)
-
-        # Now add the combined results to the simulation
+    def _add_source_results(self, order, source_results):
+        """Add the combined source cutouts and their counts to the simulation."""
         for sid in source_results:
             bounds = source_results[sid]["bounds"]
             img = source_results[sid]["image"]
@@ -496,6 +619,40 @@ class Observation:
                 setattr(slitmodel, f"fluxmodel_{i + 1}", fm)
             self.simulated_image[bounds[2] : bounds[3] + 1, bounds[0] : bounds[1] + 1] += img
             self.simulated_cutouts.append(slitmodel)
+
+    def _make_pdt_directory(self, order):
+        """Create the cache directory for this order."""  # numpydoc ignore: RT01
+        if self._pdt_run_directory is None:
+            if self.pdt_directory is None:
+                self._pdt_run_directory = tempfile.mkdtemp(prefix="wfss_pdt_", dir=Path.cwd())
+            else:
+                requested_directory = Path(self.pdt_directory).absolute()
+                directory = requested_directory.resolve()
+                if requested_directory.is_symlink():
+                    raise ValueError("PDT directory must not be a symbolic link")
+                if (
+                    directory == Path.home()
+                    or directory == Path.cwd()
+                    or directory in Path.cwd().parents
+                ):
+                    raise ValueError("PDT directory must be a dedicated output directory")
+                if directory.exists() and not self.load_pdt:
+                    log.warning("Overwriting existing PDT directory: %s", directory)
+                    shutil.rmtree(directory)
+                directory.mkdir(parents=True, exist_ok=True)
+                self._pdt_run_directory = str(directory)
+            log.info("Writing persistent PDT files to %s", self._pdt_run_directory)
+        directory = Path(self._pdt_run_directory) / f"order_{int(order)}"
+        if directory.is_symlink():
+            raise ValueError("PDT order directory must not be a symbolic link")
+        directory.mkdir(exist_ok=True)
+        if any(directory.iterdir()):
+            if not self.load_pdt or (directory / "manifest.json").exists():
+                raise FileExistsError(f"PDT order directory is not empty: {directory}")
+            log.warning("Overwriting incomplete PDT order directory: %s", directory)
+            shutil.rmtree(directory)
+            directory.mkdir()
+        return directory
 
 
 def _aggregate_by_source(results, sid, source_results):

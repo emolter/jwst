@@ -1,5 +1,6 @@
 import copy
 
+import asdf
 import numpy as np
 import pytest
 from astropy.stats import sigma_clipped_stats
@@ -81,10 +82,10 @@ def test_chunk_sources(observation, segmentation_map):
         max_pixels=max_pixels,
     )
 
-    # ensure all chunks are exactly max_pixels in size except the last one
-    for disp in disperse_args[:-1]:
-        assert len(disp[0]) == max_pixels
-    assert len(disperse_args[-1][0]) <= max_pixels
+    assert all(0 < len(args[0]) <= max_pixels for args in disperse_args)
+    for source_id, size in zip(ids, n_pix_per_sources, strict=True):
+        appearances = sum(np.any(args[4] == source_id) for args in disperse_args)
+        assert (appearances > 1) == (size > max_pixels)
 
     # Verify total number of pixels is preserved
     total_pixels_in_chunks = sum(len(args[0]) for args in disperse_args)
@@ -150,6 +151,59 @@ def test_disperse_order_with_trace_pdt(observation, segmentation_map):
     cutout = obs.simulated_cutouts[1]
     assert cutout.name == "51"
     assert np.isclose(cutout.data[5, 60], 0.09994397, rtol=0.005)
+
+
+@pytest.mark.parametrize("max_cpu", [1, 2])
+def test_replay_saved_geometry(observation, tmp_path, monkeypatch, caplog, max_cpu):
+    fresh = copy.deepcopy(observation)
+    cached = copy.deepcopy(observation)
+    fresh.save_pdt = True
+    fresh.load_pdt = True
+    cached.load_pdt = True
+    fresh.pdt_directory = cached.pdt_directory = tmp_path / "pdt"
+    incomplete_order = fresh.pdt_directory / "order_1"
+    incomplete_order.mkdir(parents=True)
+    stale_part = incomplete_order / "stale.asdf"
+    stale_part.touch()
+    sibling_order = fresh.pdt_directory / "order_2"
+    sibling_order.mkdir()
+    sibling_manifest = sibling_order / "manifest.json"
+    sibling_manifest.touch()
+    fresh.max_pixels_per_chunk = 100
+    cached.max_pixels_per_chunk = 200
+    fresh.max_cpu = cached.max_cpu = max_cpu
+    selected_ids = np.arange(50, 60)
+    args = (1, 1.708, 2.28, np.array([1.708, 2.28]), np.ones(2))
+    fresh.disperse_order(*args, selected_ids=selected_ids, basis_models=[np.square])
+    assert not stale_part.exists()
+    assert sibling_manifest.exists()
+    assert fresh.simulated_cutouts
+    assert list(fresh.pdt_directory.rglob("*part_0001.asdf"))
+
+    def unexpected_part_open(*args, **kwargs):
+        pytest.fail("Cache job preparation must gather fluxes without opening ASDF parts")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(asdf, "open", unexpected_part_open)
+        assert cached._cached_part_args(1, selected_ids, *args[3:], [np.square])
+
+    def unexpected_geometry(*args, **kwargs):
+        pytest.fail("Cache replay must not build new dispersion batches")
+
+    monkeypatch.setattr(cached, "chunk_sources", unexpected_geometry)
+    with caplog.at_level("INFO", logger="jwst.wfss_contam.observations"):
+        cached.disperse_order(*args, selected_ids=selected_ids, basis_models=[np.square])
+    assert ("Using 2 CPU cores" in caplog.text) == (max_cpu == 2)
+    assert_allclose(cached.simulated_image, fresh.simulated_image, rtol=2e-6, atol=1e-8)
+    for expected, actual in zip(fresh.simulated_cutouts, cached.simulated_cutouts, strict=True):
+        assert actual.source_id == expected.source_id
+        assert (actual.xstart, actual.ystart) == (expected.xstart, expected.ystart)
+        assert_allclose(actual.data, expected.data, rtol=2e-6, atol=1e-8)
+        assert_allclose(actual.fluxmodel_1, expected.fluxmodel_1, rtol=2e-6, atol=1e-8)
+
+    next(fresh.pdt_directory.rglob("*.asdf")).unlink()
+    with pytest.raises(FileNotFoundError):
+        cached.disperse_order(*args, selected_ids=selected_ids)
 
 
 def test_aggregate_by_source():

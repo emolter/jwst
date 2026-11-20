@@ -609,6 +609,9 @@ def contam_corr(
     rejection_threshold=0.1,
     pdt_spacing=None,
     pdt_wl_oversample=1,
+    save_pdt=False,
+    load_pdt=False,
+    pdt_directory=None,
 ):
     """
     Correct contamination in WFSS spectral cutouts.
@@ -757,6 +760,9 @@ def contam_corr(
             max_pixels_per_chunk=max_pixels_per_chunk,
             oversample_factor=oversample_factor,
             band_wavelengths=band_wavelengths,
+            save_pdt=save_pdt,
+            load_pdt=load_pdt,
+            pdt_directory=pdt_directory,
         )
 
     no_sources = True

@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 
@@ -6,6 +7,7 @@ import pytest
 import stdatamodels.jwst.datamodels as dm
 
 from jwst.tests.helpers import _help_pytest_warns
+from jwst.wfss_contam import wfss_contam
 from jwst.wfss_contam.wfss_contam_step import WfssContamStep
 
 
@@ -53,6 +55,40 @@ def multicutoutmodel(
         model.slits.append(cutout)
 
     return model
+
+
+@pytest.mark.parametrize("cache_exists", [False, True])
+@pytest.mark.parametrize("force_recompute", [False, True])
+@pytest.mark.parametrize("save_pdt", [False, True])
+@pytest.mark.parametrize("explicit_directory", [False, True])
+def test_pdt_cache_options(
+    tmp_path, monkeypatch, cache_exists, force_recompute, save_pdt, explicit_directory
+):
+    directory = tmp_path / ("custom_cache" if explicit_directory else "exposure_pdt")
+    if cache_exists:
+        directory.mkdir()
+    step = WfssContamStep(
+        output_dir=str(tmp_path),
+        pdt_directory=str(directory) if explicit_directory else None,
+        force_recompute_pdt=force_recompute,
+        save_pdt=save_pdt,
+    )
+    reuse_cache = cache_exists and not force_recompute
+
+    def check_options(model, *args, **kwargs):
+        assert Path(kwargs["pdt_directory"]) == directory
+        assert kwargs["load_pdt"] is reuse_cache
+        assert kwargs["save_pdt"] is save_pdt
+        return model, None
+
+    with dm.MultiSlitModel() as model:
+        model.meta.filename = "exposure_cal.fits"
+        monkeypatch.setattr(step, "prepare_output", lambda *args, **kwargs: model)
+        monkeypatch.setattr(step, "get_reference_file", lambda *args: "reference.fits")
+        monkeypatch.setattr(dm, "WavelengthrangeModel", lambda *args: nullcontext())
+        monkeypatch.setattr(dm, "open", lambda *args: nullcontext())
+        monkeypatch.setattr(wfss_contam, "contam_corr", check_options)
+        step.process(model)
 
 
 def test_wfss_contam_step(tmp_cwd, multicutoutmodel):

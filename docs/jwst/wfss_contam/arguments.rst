@@ -57,6 +57,26 @@ The ``wfss_contam`` step uses the following optional arguments.
   The default value of ``None`` means that the wavelength grid of the lookup table matches
   the grid specified by ``--wl_oversample``.
 
+``--save_pdt`` (bool, default=False)
+  Save newly computed source-part geometry tables for reuse. Reusing an existing
+  cache does not rewrite it. If recomputation is forced, saving overwrites the
+  existing cache with a warning.
+
+``--force_recompute_pdt`` (bool, default=False)
+  Ignore existing geometry and recompute it. By default, the step reuses geometry
+  for orders with a saved manifest and computes it on the fly otherwise. With
+  ``--save_pdt``, rebuilding an incomplete order replaces only that order's files.
+  For reuse,
+  use the same exposure, WCS, direct-image pixel grid, and segmentation map. The
+  manifest must cover the selected sources, and files listed in it must exist.
+  Force recomputation to change the saved wavelength grid or trace geometry.
+  Cached parts are modeled in parallel when ``--maximum_cores`` allows more than
+  one worker.
+
+``--pdt_directory`` (string, default=None)
+  Directory for saving or loading the cache. Defaults to ``<input root>_pdt`` under
+  the step's output directory.
+
 Polynomial fitting parameters
 -----------------------------
 

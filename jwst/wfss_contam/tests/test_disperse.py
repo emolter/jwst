@@ -4,7 +4,7 @@ from numpy.testing import assert_allclose
 from jwst.wfss_contam.disperse import (
     _build_dispersed_image_of_source,
     _replace_nans,
-    disperse,
+    disperse_and_model,
 )
 from jwst.wfss_contam.trace_pdt import (
     build_trace_pdt,
@@ -61,7 +61,7 @@ def test_disperse_oversample_same_result(grism_wcs, direct_image_with_gradient):
             (ny - 1) / 2.0,
             oversample_factor=os,
         )
-        src = disperse(
+        src = disperse_and_model(
             x0,
             y0,
             flxs,
@@ -93,7 +93,7 @@ def _disperse_one_pixel(fluxes, band_wavelengths, grism_wcs, direct_image_wcs, s
     if sens_resp is None:
         sens_resp = np.ones(100)
     lambdas = _default_lambdas(grism_wcs)
-    src = disperse(
+    src = disperse_and_model(
         x0,
         y0,
         fluxes,
@@ -197,7 +197,7 @@ def _disperse_one_pixel_with_basis(grism_wcs, direct_image_wcs, basis_models=Non
     source_ids = np.array([_SOURCE_ID])
     sens_resp = np.ones_like(_SENS_WAVES)
     lambdas = _default_lambdas(grism_wcs)
-    return disperse(
+    return disperse_and_model(
         xs,
         ys,
         fluxes,
@@ -257,10 +257,9 @@ def test_flux_models_superposition(grism_wcs, direct_image_with_gradient):
 def test_build_dispersed_image_of_source_accumulates_duplicates():
     """Duplicate coordinates should sum their flux contributions."""
     img = _build_dispersed_image_of_source(
-        x=np.array([0, 0, 1]),
-        y=np.array([0, 0, 1]),
+        flat_idx=np.array([0, 0, 3]),
         flux=np.array([1.0, 2.0, 3.0]),
-        bounds=[0, 1, 0, 1],
+        shape=(2, 2),
     )
     assert_allclose(img, np.array([[3.0, 0.0], [0.0, 3.0]]))
 
@@ -304,8 +303,8 @@ def test_disperse_with_trace_pdt_matches_exact(grism_wcs, direct_image_with_grad
         "grism_wcs": grism_wcs,
         "naxis": _NAXIS,
     }
-    exact = disperse(x0, y0, trace_pdt=None, **common_kwargs)
-    approx = disperse(x0, y0, trace_pdt=trace_pdt, **common_kwargs)
+    exact = disperse_and_model(x0, y0, trace_pdt=None, **common_kwargs)
+    approx = disperse_and_model(x0, y0, trace_pdt=trace_pdt, **common_kwargs)
 
     img_exact = exact[_SOURCE_ID]["image"]
     img_approx = approx[_SOURCE_ID]["image"]
