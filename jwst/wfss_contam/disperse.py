@@ -542,8 +542,8 @@ def disperse_and_model(
     source_parts : dict, optional
         Source IDs mapped to part numbers when writing to disk.
     cached_part : tuple, optional
-        Source ID and path of a saved part. When provided, fluxes must be aligned
-        with its stored input pixels and no WCS transforms are evaluated.
+        Source ID and path of a saved part. When provided, the WCS transform
+        evaluation is skipped.
 
     Returns
     -------

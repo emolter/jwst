@@ -14,7 +14,7 @@ from astropy.utils.exceptions import AstropyUserWarning
 from photutils.background import Background2D, MedianBackground
 
 from jwst.wfss_contam.disperse import disperse_and_model
-from jwst.wfss_contam.pdt_fileio import load_pdt_from_files
+from jwst.wfss_contam.pdt_fileio import load_pdt_manifest
 from jwst.wfss_contam.transform_interp import (
     build_transform_interp,
     get_grism_detector_transform,
@@ -574,7 +574,7 @@ class Observation:
     def _cached_part_args(self, order, selected_ids, sens_waves, sens_response, basis_models):
         directory = Path(self.pdt_directory) / f"order_{int(order)}"
         selected_ids = _select_ids(selected_ids, self.source_ids)
-        lambdas, parts = load_pdt_from_files(directory, order, selected_ids)
+        lambdas, parts = load_pdt_manifest(directory, order, selected_ids)
         disperse_args = []
         for sid, path, input_xy in parts:
             input_x, input_y = np.asarray(input_xy, dtype=np.intp).T

@@ -6,13 +6,11 @@ from pathlib import Path
 import asdf
 import numpy as np
 
-__all__ = ["write_pdt_to_files", "load_pdt_from_files", "open_pdt_part"]
+__all__ = ["write_pdt_to_files", "load_pdt_manifest", "open_pdt_part"]
 
 
-def _storage_uint(values, dtype, name):  # numpydoc ignore:RT01
-    """Copy an integer array to its on-disk dtype without allowing wraparound."""
-    if values.size and (values.min() < 0 or values.max() > np.iinfo(dtype).max):
-        raise OverflowError(f"PDT {name} values do not fit in {np.dtype(dtype).name}")
+def _storage_uint(values, dtype):  # numpydoc ignore:RT01
+    """Copy an integer array to its on-disk dtype."""
     return values.astype(dtype, copy=True)
 
 
@@ -35,8 +33,6 @@ def write_pdt_to_files(geometry, directory, source_parts):
         Source IDs mapped to written part filenames and their input pixel coordinates.
     """
     files = {source_id: [] for source_id in source_parts}
-    if geometry is None:
-        return files
 
     order = geometry["order"]
     wavelength = geometry["wavelength"]
@@ -44,7 +40,6 @@ def write_pdt_to_files(geometry, directory, source_parts):
         geometry["source_id"], return_index=True, return_counts=True
     )
     for source_id, start, size in zip(source_ids, starts, sizes, strict=True):
-        source_id = int(source_id)
         stop = start + size
         pointers = geometry["pixel_idx_ptr"][start : stop + 1]
         first, last = int(pointers[0]), int(pointers[-1])
@@ -65,16 +60,15 @@ def write_pdt_to_files(geometry, directory, source_parts):
                     "wavelength": wavelength.astype(np.float32),
                     "spectral_order": int(order),
                     "input_xy": geometry["input_xy"][start:stop][has_contributions],
-                    "pixel_idx_ptr": _storage_uint(compact_pointers, np.uint32, "pixel_idx_ptr"),
-                    "grism_xy": _storage_uint(
-                        geometry["grism_xy"][first:last], np.uint16, "grism_xy"
-                    ),
+                    "pixel_idx_ptr": _storage_uint(compact_pointers, np.uint32),
+                    "grism_xy": _storage_uint(geometry["grism_xy"][first:last], np.uint16),
                     "wavelength_index": _storage_uint(
-                        geometry["wavelength_index"][first:last], np.uint16, "wavelength_index"
+                        geometry["wavelength_index"][first:last], np.uint16
                     ),
                     "fractional_area": geometry["fractional_area"][first:last].astype(np.float32),
                 }
                 with asdf.AsdfFile(tree) as table:
+                    # writing checksums is slow
                     table.write_to(handle.file, write_checksums=False)
             temporary_path.replace(filename)
         finally:
@@ -85,7 +79,7 @@ def write_pdt_to_files(geometry, directory, source_parts):
     return files
 
 
-def load_pdt_from_files(directory, order, selected_ids):
+def load_pdt_manifest(directory, order, selected_ids):
     """
     Read the order manifest without loading the contribution arrays.
 
