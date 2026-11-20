@@ -6,8 +6,8 @@ from jwst.wfss_contam.disperse import (
     _replace_nans,
     disperse_and_model,
 )
-from jwst.wfss_contam.trace_pdt import (
-    build_trace_pdt,
+from jwst.wfss_contam.transform_interp import (
+    build_transform_interp,
     get_grism_detector_transform,
     native_wavelength_grid,
 )
@@ -278,8 +278,8 @@ def test_replace_nans_no_nans():
     assert filled is arr
 
 
-def test_disperse_with_trace_pdt_matches_exact(grism_wcs, direct_image_with_gradient):
-    """Dispersing with a trace_pdt should match the exact per-pixel transform."""
+def test_disperse_with_transform_interp_matches_exact(grism_wcs, direct_image_with_gradient):
+    """Dispersing with a transform_interp should match the exact per-pixel transform."""
     x0 = np.array([200.5])
     y0 = np.array([200.5])
     order = 1
@@ -288,7 +288,9 @@ def test_disperse_with_trace_pdt_matches_exact(grism_wcs, direct_image_with_grad
     source_id = np.array([50])
     direct_image_wcs = direct_image_with_gradient.meta.wcs
 
-    trace_pdt = build_trace_pdt(grism_wcs, order, _WMIN, _WMAX, _COORD_LIMITS, spacing=20)
+    transform_interp = build_transform_interp(
+        grism_wcs, order, _WMIN, _WMAX, _COORD_LIMITS, spacing=20
+    )
     lambdas = _default_lambdas(grism_wcs, order=order)
 
     common_kwargs = {
@@ -303,8 +305,8 @@ def test_disperse_with_trace_pdt_matches_exact(grism_wcs, direct_image_with_grad
         "grism_wcs": grism_wcs,
         "naxis": _NAXIS,
     }
-    exact = disperse_and_model(x0, y0, trace_pdt=None, **common_kwargs)
-    approx = disperse_and_model(x0, y0, trace_pdt=trace_pdt, **common_kwargs)
+    exact = disperse_and_model(x0, y0, transform_interp=None, **common_kwargs)
+    approx = disperse_and_model(x0, y0, transform_interp=transform_interp, **common_kwargs)
 
     img_exact = exact[_SOURCE_ID]["image"]
     img_approx = approx[_SOURCE_ID]["image"]

@@ -13,11 +13,11 @@ from jwst.wfss_contam.sens1d import create_1d_sens
 log = logging.getLogger(__name__)
 
 
-__all__ = ["contam_model", "disperse_and_model"]
+__all__ = ["contam_model", "disperse_and_model", "disperse"]
 
 
 def _disperse_onto_grism(
-    x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas, order, trace_pdt=None
+    x0_sky, y0_sky, sky_to_imgxy, imgxy_to_grismxy, lambdas, order, transform_interp=None
 ):
     """
     Compute x/y positions in the grism image for the set of desired wavelengths.
@@ -36,7 +36,8 @@ def _disperse_onto_grism(
         Wavelengths at which to compute dispersed pixel values
     order : int
         Spectral order number
-    trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
+    transform_interp : \
+        `~jwst.wfss_contam.transform_interp.DispersionTransformInterpolator`, optional
         If provided, used in place of ``imgxy_to_grismxy`` to approximate the
         dispersed pixel positions via a cached, precomputed grid.
 
@@ -53,8 +54,8 @@ def _disperse_onto_grism(
     x0_xy, y0_xy, _, _ = sky_to_imgxy(x0_sky, y0_sky, 1, order)
     n_pixels = len(x0_xy)
 
-    if trace_pdt is not None:
-        x0s, y0s = trace_pdt.evaluate_grid(x0_xy, y0_xy, lambdas)
+    if transform_interp is not None:
+        x0s, y0s = transform_interp.evaluate_grid(x0_xy, y0_xy, lambdas)
         lambdas = np.repeat(lambdas[:, np.newaxis], n_pixels, axis=1)
     else:
         n_lam = len(lambdas)
@@ -221,7 +222,7 @@ def _replace_nans(fluxes):
     return fluxes
 
 
-def _disperse_geometry(
+def disperse(
     xs,
     ys,
     source_ids_per_pixel,
@@ -230,7 +231,7 @@ def _disperse_geometry(
     direct_image_wcs,
     grism_wcs,
     naxis,
-    trace_pdt=None,
+    transform_interp=None,
 ):
     """
     Compute the dispersed image pixel values from the direct image.
@@ -253,7 +254,8 @@ def _disperse_geometry(
         WCS object for the grism image
     naxis : tuple
         Dimensions of the grism image (naxis[0], naxis[1])
-    trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
+    transform_interp : \
+        `~jwst.wfss_contam.transform_interp.DispersionTransformInterpolator`, optional
         If provided, used in place of the exact "detector" to "grism_detector" transform
         to approximate the dispersed pixel positions via a cached, precomputed grid.
         This substantially speeds up dispersion at the cost of a small amount of accuracy.
@@ -317,7 +319,7 @@ def _disperse_geometry(
         imgxy_to_grismxy,
         lambdas,
         order,
-        trace_pdt=trace_pdt,
+        transform_interp=transform_interp,
     )
     del x0_sky, y0_sky
 
@@ -484,7 +486,7 @@ def disperse_and_model(
     grism_wcs,
     naxis,
     basis_models=None,
-    trace_pdt=None,
+    transform_interp=None,
     pdt_directory=None,
     source_parts=None,
     cached_part=None,
@@ -529,7 +531,8 @@ def disperse_and_model(
         Flux distributions to evaluate at each wavelength. Typically these will be single
         polynomial orders, e.g. [lambda x: x, lambda x: x^2], ...] the coefficients of which
         are linearly fit later.
-    trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
+    transform_interp : \
+        `~jwst.wfss_contam.transform_interp.DispersionTransformInterpolator`, optional
         If provided, used in place of the exact "detector" to "grism_detector" transform
         to approximate the dispersed pixel positions via a cached, precomputed grid.
         This substantially speeds up dispersion at the cost of a small amount of accuracy.
@@ -550,7 +553,7 @@ def disperse_and_model(
         When saving, returned together with the written part metadata as a tuple.
     """
     if cached_part is None:
-        geometry = _disperse_geometry(
+        geometry = disperse(
             xs,
             ys,
             source_ids_per_pixel,
@@ -559,7 +562,7 @@ def disperse_and_model(
             direct_image_wcs,
             grism_wcs,
             naxis,
-            trace_pdt=trace_pdt,
+            transform_interp=transform_interp,
         )
         geometry["wavelength"] = lambdas
         geometry["order"] = order

@@ -12,7 +12,7 @@ from jwst.wfss_contam.observations import (
     _select_ids,
     background_subtract,
 )
-from jwst.wfss_contam.trace_pdt import get_grism_detector_transform, native_wavelength_grid
+from jwst.wfss_contam.transform_interp import get_grism_detector_transform, native_wavelength_grid
 
 
 @pytest.fixture
@@ -130,8 +130,8 @@ def test_disperse_order(observation, segmentation_map, chunk_size):
     assert np.isclose(cutout.data[5, 60], 0.09994397, rtol=0.005)
 
 
-def test_disperse_order_with_trace_pdt(observation, segmentation_map):
-    """Using trace_pdt should give results close to the exact per-pixel transform."""
+def test_disperse_order_with_transform_interp(observation, segmentation_map):
+    """Using transform_interp should give results close to the exact per-pixel transform."""
     obs = copy.deepcopy(observation)
     order = 1
     sens_waves = np.linspace(1.708, 2.28, 100)
@@ -143,7 +143,7 @@ def test_disperse_order_with_trace_pdt(observation, segmentation_map):
     source_ids = all_ids[50:60]
 
     obs.disperse_order(
-        order, wmin, wmax, sens_waves, sens_resp, selected_ids=source_ids, pdt_spacing=20
+        order, wmin, wmax, sens_waves, sens_resp, selected_ids=source_ids, interp_spacing=20
     )
 
     assert not np.allclose(obs.simulated_image, 0.0)
@@ -193,7 +193,7 @@ def test_replay_saved_geometry(observation, tmp_path, monkeypatch, caplog, max_c
     monkeypatch.setattr(cached, "chunk_sources", unexpected_geometry)
     with caplog.at_level("INFO", logger="jwst.wfss_contam.observations"):
         cached.disperse_order(*args, selected_ids=selected_ids, basis_models=[np.square])
-    assert ("Using 2 CPU cores" in caplog.text) == (max_cpu == 2)
+    assert ("Using 2 CPU core(s)" in caplog.text) == (max_cpu == 2)
     assert_allclose(cached.simulated_image, fresh.simulated_image, rtol=2e-6, atol=1e-8)
     for expected, actual in zip(fresh.simulated_cutouts, cached.simulated_cutouts, strict=True):
         assert actual.source_id == expected.source_id

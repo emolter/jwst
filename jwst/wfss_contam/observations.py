@@ -15,8 +15,8 @@ from photutils.background import Background2D, MedianBackground
 
 from jwst.wfss_contam.disperse import disperse_and_model
 from jwst.wfss_contam.pdt_fileio import load_pdt_from_files
-from jwst.wfss_contam.trace_pdt import (
-    build_trace_pdt,
+from jwst.wfss_contam.transform_interp import (
+    build_transform_interp,
     get_grism_detector_transform,
     native_wavelength_grid,
 )
@@ -294,7 +294,7 @@ class Observation:
         selected_ids=None,
         max_pixels=5000,
         basis_models=None,
-        trace_pdt=None,
+        transform_interp=None,
     ):
         """
         Pack whole sources into bounded batches, splitting only oversized sources.
@@ -313,7 +313,8 @@ class Observation:
             whole; only sources whose total size exceeds this limit may be split
             to fill available batch space. Their final partial batch remains open
             for subsequent whole sources.
-        trace_pdt : `~jwst.wfss_contam.trace_pdt.TracePDT`, optional
+        transform_interp : \
+            `~jwst.wfss_contam.transform_interp.DispersionTransformInterpolator`, optional
             Precomputed pixel dispersion table for this spectral order.
             If None, no lookup table is used.
 
@@ -373,7 +374,7 @@ class Observation:
                     self.grism_wcs,
                     self.naxis,
                     basis_models,
-                    trace_pdt,
+                    transform_interp,
                 ]
             )
 
@@ -388,8 +389,8 @@ class Observation:
         sens_response,
         selected_ids=None,
         basis_models=None,
-        pdt_spacing=None,
-        pdt_wl_oversample=1,
+        interp_spacing=None,
+        interp_wl_oversample=1,
     ):
         """
         Disperse the sources for a given spectral order, with multiprocessing.
@@ -414,17 +415,18 @@ class Observation:
             Flux distributions to evaluate at each wavelength. Typically these will be single
             polynomial orders, e.g. [lambda x: x, lambda x: x^2], ...] the coefficients of which
             are linearly fit later. If None, no models are included in the output.
-        pdt_spacing : int, optional
+        interp_spacing : int, optional
             Spacing of grid points to sample along the x and y axes
             when building a cached lookup table for the trace-shape transform. If None
             (the default), no lookup table is used and the exact transform is evaluated directly
             for every pixel.
-        pdt_wl_oversample : float, optional
+        interp_wl_oversample : float, optional
             Oversampling factor for the lookup table's wavelength grid, relative to the
             native dispersion scale. If None, the lookup table's wavelength grid instead
             exactly matches the dispersal wavelength grid, allowing
-            `~jwst.wfss_contam.trace_pdt.TracePDT.evaluate_grid` to skip wavelength-axis
-            interpolation entirely. Only used if ``pdt_spacing`` is not None.
+            `~jwst.wfss_contam.transform_interp.DispersionTransformInterpolator.evaluate_grid`
+            to skip wavelength-axis
+            interpolation entirely. Only used if ``interp_spacing`` is not None.
         """
         order_directory = (
             Path(self.pdt_directory) / f"order_{int(order)}" if self.load_pdt else None
@@ -445,8 +447,8 @@ class Observation:
                 sens_response,
                 selected_ids,
                 basis_models,
-                pdt_spacing,
-                pdt_wl_oversample,
+                interp_spacing,
+                interp_wl_oversample,
             )
 
         if save_order:
@@ -499,8 +501,8 @@ class Observation:
         sens_response,
         selected_ids,
         basis_models,
-        pdt_spacing,
-        pdt_wl_oversample,
+        interp_spacing,
+        interp_wl_oversample,
     ):
         # Determine the wavelength grid once per order.
         # native spacing does not vary significantly across the detector, so a single
@@ -517,8 +519,8 @@ class Observation:
             oversample_factor=self.oversample_factor,
         )
 
-        trace_pdt_obj = None
-        if pdt_spacing is not None:
+        transform_interp_obj = None
+        if interp_spacing is not None:
             # Determine the spatial bounding box of sources in the WFSS un-dispersed detector frame.
             # Transform the 4 corners of the direct image / segmentation map into that frame
             ny_seg, nx_seg = self.seg.shape
@@ -534,25 +536,25 @@ class Observation:
                 max(float(self.naxis[1] - 1), float(np.ceil(np.max(y0_xy)))),
             )
 
-            if pdt_wl_oversample is None:
-                trace_pdt_obj = build_trace_pdt(
+            if interp_wl_oversample is None:
+                transform_interp_obj = build_transform_interp(
                     self.grism_wcs,
                     order,
                     wmin,
                     wmax,
                     coord_limits,
-                    spacing=pdt_spacing,
+                    spacing=interp_spacing,
                     lam_grid=lambdas,
                 )
             else:
-                trace_pdt_obj = build_trace_pdt(
+                transform_interp_obj = build_transform_interp(
                     self.grism_wcs,
                     order,
                     wmin,
                     wmax,
                     coord_limits,
-                    spacing=pdt_spacing,
-                    wave_oversample_factor=pdt_wl_oversample,
+                    spacing=interp_spacing,
+                    wave_oversample_factor=interp_wl_oversample,
                 )
 
         # generate lists of input parameters for the disperse function
@@ -565,7 +567,7 @@ class Observation:
             selected_ids=selected_ids,
             max_pixels=self.max_pixels_per_chunk,
             basis_models=basis_models,
-            trace_pdt=trace_pdt_obj,
+            transform_interp=transform_interp_obj,
         )
         return disperse_args, lambdas
 

@@ -25,7 +25,7 @@ def run_spec2_with_contam_f322w2(rtdata_module, resource_tracker):
             "--steps.wfss_contam.save_results=true",
             "--steps.wfss_contam.skip=False",
             "--steps.wfss_contam.maximum_cores=none",
-            "--steps.wfss_contam.pdt_spacing=20",
+            "--steps.wfss_contam.interp_spacing=20",
         ],
     }
     with resource_tracker.track():

@@ -43,7 +43,7 @@ The ``wfss_contam`` step uses the following optional arguments.
   Decreasing this value will typically reduce the memory usage of the step. The effect on runtime
   depends on the machine hardware and whether multi-processing is enabled.
 
-``--pdt_spacing`` (int, default=None)
+``--interp_spacing`` (int, default=None)
   Spacing of the grid point sampling along the x and y
   axes when building a cached lookup table that approximates the direct-to-grism
   transform used to disperse each pixel. Since the trace shape varies smoothly across the
@@ -52,7 +52,7 @@ The ``wfss_contam`` step uses the following optional arguments.
   amount of accuracy. The default value of ``None`` means that no lookup table is
   used and the exact transform is evaluated for every pixel.
 
-``--pdt_wl_oversample`` (float, default=None)
+``--interp_wl_oversample`` (float, default=None)
   Oversampling factor for the trace lookup table's wavelength grid.
   The default value of ``None`` means that the wavelength grid of the lookup table matches
   the grid specified by ``--wl_oversample``.

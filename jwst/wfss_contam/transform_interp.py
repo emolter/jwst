@@ -4,10 +4,14 @@ import numpy as np
 from astropy.modeling.mappings import Mapping
 from scipy.interpolate import RegularGridInterpolator
 
-__all__ = ["TracePDT", "build_trace_pdt", "get_grism_detector_transform"]
+__all__ = [
+    "DispersionTransformInterpolator",
+    "build_transform_interp",
+    "get_grism_detector_transform",
+]
 
 
-class TracePDT:
+class DispersionTransformInterpolator:
     """
     Interpolated replacement for the "detector" to "grism_detector" WCS transform.
 
@@ -90,7 +94,7 @@ class TracePDT:
         done once per pixel (independent of wavelength), and the wavelength grid-cell
         lookup is done once for the shared wavelength array.
 
-        If this `TracePDT` was built with ``exact_wavelength_grid=True``,
+        If this `DispersionTransformInterpolator` was built with ``exact_wavelength_grid=True``,
         wavelength-axis interpolation is skipped entirely, reducing this to a 2-D
         (x0, y0) bilinear lookup. Otherwise, wavelength is interpolated linearly.
 
@@ -100,8 +104,8 @@ class TracePDT:
             1-D arrays giving the detector x, y position of each pixel to disperse.
         wavelength : np.ndarray
             1-D array giving the wavelengths to evaluate,
-            shared by every pixel. If this `TracePDT` was built with
-            ``exact_wavelength_grid=True`` (see `build_trace_pdt`'s ``lam_grid``
+            shared by every pixel. If this `DispersionTransformInterpolator` was built with
+            ``exact_wavelength_grid=True`` (see `build_transform_interp`'s ``lam_grid``
             argument), this must be exactly the same array used to build the grid.
 
         Returns
@@ -118,7 +122,8 @@ class TracePDT:
                 wavelength, self._lam_grid
             ):
                 raise ValueError(
-                    "This TracePDT was built with exact_wavelength_grid=True, so "
+                    "This DispersionTransformInterpolator was built with "
+                    "exact_wavelength_grid=True, so "
                     "evaluate_grid() must be called with the same wavelength array "
                     "used to build it."
                 )
@@ -207,7 +212,9 @@ class TracePDT:
         np.ndarray
             Interpolated values at the specified pixel and wavelength coordinates.
         """
-        curve = TracePDT._bilinear_only(grid_vals, ix, wx, iy, wy)  # (n_pixels, n_wave_grid)
+        curve = DispersionTransformInterpolator._bilinear_only(
+            grid_vals, ix, wx, iy, wy
+        )  # (n_pixels, n_wave_grid)
 
         # Linear interpolation along wavelength, shared across all pixels.
         lo = curve[:, ilam]
@@ -276,7 +283,7 @@ def get_grism_detector_transform(grism_wcs):
     return imgxy_to_grismxy | Mapping((0, 1), n_inputs=n_outputs)
 
 
-def build_trace_pdt(
+def build_transform_interp(
     grism_wcs,
     order,
     wmin,
@@ -287,7 +294,7 @@ def build_trace_pdt(
     lam_grid=None,
 ):
     """
-    Build a TracePDT for one spectral order by sampling the exact transform on a coarse grid.
+    Build a DispersionTransformInterpolator for one spectral order.
 
     Parameters
     ----------
@@ -312,15 +319,16 @@ def build_trace_pdt(
     lam_grid : np.ndarray, optional
         Precomputed wavelength grid to use directly instead of computing one from
         ``wmin``, ``wmax``, and ``wave_oversample_factor``. This must exactly match the
-        wavelength array that will later be passed to `TracePDT.evaluate_grid`, as
+        wavelength array that will later be passed to
+        `DispersionTransformInterpolator.evaluate_grid`, as
         setting this means interpolation along the wavelength axis will be skipped entirely
         at query time. If None (the default), the grid is computed
         from ``wmin``, ``wmax``, and ``wave_oversample_factor``.
 
     Returns
     -------
-    TracePDT
-        Lookup table object that can be called as ``trace_pdt(x0, y0, wavelength)``
+    DispersionTransformInterpolator
+        Lookup table object that can be called as ``transform_interp(x0, y0, wavelength)``
         to approximate the exact "detector" to "grism_detector" transform.
     """
     imgxy_to_grismxy = get_grism_detector_transform(grism_wcs)
@@ -365,6 +373,6 @@ def build_trace_pdt(
     dx_grid = np.moveaxis(dx_grid, 0, -1)
     dy_grid = np.moveaxis(dy_grid, 0, -1)
 
-    return TracePDT(
+    return DispersionTransformInterpolator(
         x0_grid, y0_grid, lam_grid, dx_grid, dy_grid, exact_wavelength_grid=exact_wavelength_grid
     )

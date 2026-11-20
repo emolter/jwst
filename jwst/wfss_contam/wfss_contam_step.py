@@ -31,8 +31,8 @@ class WfssContamStep(Step):
         n_iterations = integer(default=1)  # Number of contamination-correction iterations
         l2_alpha = float(default=0.1)  # L2 regularization strength for polynomial spectral fit
         rejection_threshold = float(default=0.1)  # Threshold for rejecting polynomial fits based on fitted constant term coefficient
-        pdt_spacing = integer(default=None)  # Spacing of grid points per spatial axis for the trace lookup table; None disables spatial interpolation and uses the full transform at every pixel
-        pdt_wl_oversample = float(default=None)  # Oversampling factor for the trace lookup table's wavelength grid; None matches the grid specified by wl_oversample
+        interp_spacing = integer(default=None)  # Spacing of grid points per spatial axis for the trace lookup table; None disables spatial interpolation and uses the full transform at every pixel
+        interp_wl_oversample = float(default=None)  # Oversampling factor for the trace lookup table's wavelength grid; None matches the grid specified by wl_oversample
         save_pdt = boolean(default=False)  # Save pixel dispersion tables for reuse
         force_recompute_pdt = boolean(default=False)  # Ignore any existing pixel dispersion table cache
         pdt_directory = string(default=None)  # Defaults to <input root>_pdt under output_dir
@@ -100,8 +100,8 @@ class WfssContamStep(Step):
                 n_iterations=self.n_iterations,
                 l2_alpha=self.l2_alpha,
                 rejection_threshold=self.rejection_threshold,
-                pdt_spacing=self.pdt_spacing,
-                pdt_wl_oversample=self.pdt_wl_oversample,
+                interp_spacing=self.interp_spacing,
+                interp_wl_oversample=self.interp_wl_oversample,
                 save_pdt=self.save_pdt,
                 load_pdt=load_pdt,
                 pdt_directory=pdt_directory,

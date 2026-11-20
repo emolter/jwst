@@ -30,7 +30,7 @@ def run_wfss_contam(rtdata_module, resource_tracker):
             "--steps.wfss_contam.save_results=true",
             "--steps.wfss_contam.skip=False",
             "--steps.wfss_contam.maximum_cores=none",
-            "--steps.wfss_contam.pdt_spacing=20",
+            "--steps.wfss_contam.interp_spacing=20",
             "--steps.wfss_contam.magnitude_limit=22",
         ],
     }
